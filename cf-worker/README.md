@@ -36,6 +36,13 @@ per call, but setting it in the portal keeps the two consistent.
 
 ## Placing a call
 
+PowerShell (note: `curl` is an alias for `Invoke-WebRequest` and will not accept
+`-H`; use `Invoke-RestMethod` or the real `curl.exe`):
+
+    Invoke-RestMethod -Uri "https://<worker-host>/calls" -Method Post -Headers @{ Authorization = "Bearer $env:TRIGGER_SECRET" } -ContentType "application/json" -Body '{"to":"+37060000000"}'
+
+bash:
+
     curl -X POST https://<worker-host>/calls \
       -H "Authorization: Bearer $TRIGGER_SECRET" \
       -H "Content-Type: application/json" \
