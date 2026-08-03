@@ -38,6 +38,22 @@ describe("sendCommand", () => {
     ).rejects.toMatchObject({ name: "TelnyxError", status: 422 });
   });
 
+  it("uses PUT when the command asks for it", async () => {
+    const spy = stubFetch(new Response("{}", { status: 200 }));
+
+    await sendCommand(
+      "call-abc",
+      { action: "client_state_update", method: "PUT", params: { client_state: "z" } },
+      "KEY123",
+    );
+
+    const [url, init] = spy.mock.calls[0]!;
+    expect(url).toBe(
+      "https://api.telnyx.com/v2/calls/call-abc/actions/client_state_update",
+    );
+    expect(init.method).toBe("PUT");
+  });
+
   it("url-encodes the call control id", async () => {
     const spy = stubFetch(new Response("{}", { status: 200 }));
     await sendCommand("a/b c", { action: "hangup", params: {} }, "K");

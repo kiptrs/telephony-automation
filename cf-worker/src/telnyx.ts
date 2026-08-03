@@ -35,7 +35,7 @@ export async function sendCommand(
   const url = `${API_BASE}/calls/${encodeURIComponent(callControlId)}/actions/${command.action}`;
 
   const response = await fetch(url, {
-    method: "POST",
+    method: command.method ?? "POST",
     headers: headers(apiKey),
     body: JSON.stringify(command.params),
   });

@@ -72,7 +72,7 @@ describe("POST /webhooks/telnyx", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it("issues record_start and playback_start on a signed call.answered", async () => {
+  it("issues record_start, transcription_start and playback_start on a signed call.answered", async () => {
     const spy = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     vi.stubGlobal("fetch", spy);
 
@@ -85,9 +85,10 @@ describe("POST /webhooks/telnyx", () => {
     const response = await worker.fetch(request, env(), ctx);
 
     expect(response.status).toBe(200);
-    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenCalledTimes(3);
     expect(spy.mock.calls[0]![0]).toContain("/actions/record_start");
-    expect(spy.mock.calls[1]![0]).toContain("/actions/playback_start");
+    expect(spy.mock.calls[1]![0]).toContain("/actions/transcription_start");
+    expect(spy.mock.calls[2]![0]).toContain("/actions/playback_start");
   });
 
   it("uses the request origin for the audio url", async () => {
@@ -102,7 +103,7 @@ describe("POST /webhooks/telnyx", () => {
     });
     await worker.fetch(request, env(), ctx);
 
-    const body = JSON.parse(spy.mock.calls[1]![1].body);
+    const body = JSON.parse(spy.mock.calls[2]![1].body);
     expect(body.audio_url).toBe("https://w.example.dev/audio/q1.mp3");
   });
 
@@ -115,7 +116,7 @@ describe("POST /webhooks/telnyx", () => {
         event_type: "call.recording.saved",
         payload: {
           call_control_id: "ccid-1",
-          client_state: encodeState({ step: "done" }),
+          client_state: encodeState({ step: "done", phase: "playing" }),
           recording_urls: { mp3: "https://rec.example/x.mp3" },
         },
       },

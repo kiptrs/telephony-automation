@@ -1,4 +1,4 @@
-import { decide } from "./flow";
+import { decide, type TranscriptionPayload } from "./flow";
 import { createCall, sendCommand, TelnyxError } from "./telnyx";
 import { verifyTelnyxSignature } from "./verify";
 
@@ -76,6 +76,7 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
     eventType,
     clientState: webhook.data?.payload?.client_state,
     originUrl: new URL(request.url).origin,
+    payload: webhook.data?.payload as TranscriptionPayload | undefined,
   });
 
   for (const command of commands) {
