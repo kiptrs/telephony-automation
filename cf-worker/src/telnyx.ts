@@ -27,11 +27,17 @@ function headers(apiKey: string): Record<string, string> {
   };
 }
 
+/**
+ * Returns Telnyx's response body. A 2xx only means the command was accepted,
+ * not that the underlying engine started - transcription_start returned 200
+ * once and then produced no transcripts at all, which was undiagnosable
+ * because the body was being discarded.
+ */
 export async function sendCommand(
   callControlId: string,
   command: Command,
   apiKey: string,
-): Promise<void> {
+): Promise<string> {
   const url = `${API_BASE}/calls/${encodeURIComponent(callControlId)}/actions/${command.action}`;
 
   const response = await fetch(url, {
@@ -40,12 +46,13 @@ export async function sendCommand(
     body: JSON.stringify(command.params),
   });
 
+  const text = await response.text();
+
   if (!response.ok) {
-    throw new TelnyxError(
-      response.status,
-      `${command.action} failed: ${await response.text()}`,
-    );
+    throw new TelnyxError(response.status, `${command.action} failed: ${text}`);
   }
+
+  return text;
 }
 
 export async function createCall(args: CreateCallArgs): Promise<string> {

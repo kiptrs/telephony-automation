@@ -6,6 +6,12 @@
   "assets": {
     "directory": "./public"
   },
+  "durable_objects": {
+    "bindings": [{ "name": "CALL_SESSIONS", "class_name": "CallSession" }]
+  },
+  // new_sqlite_classes (not new_classes): SQLite-backed Durable Objects are
+  // the variant available on the Workers free plan.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CallSession"] }],
   "observability": {
     "enabled": true
   }

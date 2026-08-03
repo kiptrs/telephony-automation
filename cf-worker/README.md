@@ -4,12 +4,49 @@ Cloudflare Worker driving a three-question voice survey over a Telnyx number.
 
 ## Flow
 
-Outbound call answered -> start dual-channel recording -> play `q1.mp3` ->
-listen via `gather_using_ai` -> `q2.mp3` -> listen -> `q3.mp3` -> listen ->
+Outbound call answered -> dual-channel recording + media stream opened ->
+`q1.mp3` -> caller answers -> `q2.mp3` -> answers -> `q3.mp3` -> answers ->
 `thanks.mp3` -> hangup.
 
-Flow position lives in Telnyx's `client_state`, so the Worker is stateless.
-There is no KV namespace and no Durable Object.
+Answers end when the caller **stops speaking for `silenceMs`** (default 2500).
+Detection is done here, not by Telnyx: `streaming_start` forks the caller's
+inbound audio to a WebSocket, and a Durable Object measures the energy of each
+20ms mu-law frame.
+
+### Responsibilities
+
+| Piece | Owns |
+|---|---|
+| `src/vad.ts` | mu-law decoding and the silence decision. Pure, fully unit tested. |
+| `src/session.ts` | `CallSession` Durable Object: the media socket and per-call VAD state. Plays the next question when an answer ends. |
+| `src/flow.ts` | Call setup and hangup. Pure. |
+| `src/index.ts` | Routing; arms the session when a question finishes playing. |
+
+The Worker itself stays stateless. Only the Durable Object holds state, because
+silence is only observable by watching a live stream over time.
+
+### Why not Telnyx's own speech features
+
+Both were tried against a live number and both failed:
+
+- `gather_using_ai` is a conversational LLM assistant, not a silence detector.
+  Omitting its `greeting` suppresses only the opening line; it still spoke its
+  own follow-up questions in TTS (`Telnyx.KokoroTTS.af`), and returned
+  `422 AI Assistant is already in progress` when the flow tried to advance.
+- `transcription_start` returned 200 and then emitted no `call.transcription`
+  events at all, across several engine configurations.
+
+Media streaming depends on neither subsystem.
+
+### Tuning
+
+`SPEECH_THRESHOLD` in `src/vad.ts` is the mean absolute amplitude (0..32768)
+above which a frame counts as speech. If a call never advances, the threshold
+is likely too low and background noise is holding the answer open; raise it. A
+threshold that is too high degrades safely - the answer ends at the 30 second
+`MAX_ANSWER_MS` cap rather than misbehaving.
+
+Watch `stream_open`, `vad_armed`, and `answer_ended` in `wrangler tail`.
 
 ## Setup
 
@@ -40,6 +77,20 @@ PowerShell (note: `curl` is an alias for `Invoke-WebRequest` and will not accept
 `-H`; use `Invoke-RestMethod` or the real `curl.exe`):
 
     Invoke-RestMethod -Uri "https://<worker-host>/calls" -Method Post -Headers @{ Authorization = "Bearer $env:TRIGGER_SECRET" } -ContentType "application/json" -Body '{"to":"+37060000000"}'
+
+### Silence threshold
+
+`silenceMs` is optional and sets how long the caller must be quiet before the
+answer is treated as finished. Default 2500, accepted range 500-10000; anything
+outside that silently falls back to the default.
+
+    -Body '{"to":"+37069625082","silenceMs":3000}'
+
+The setting travels to the media stream on the `webhook_url` and `stream_url`
+query strings.
+
+There is no language setting, because nothing in this flow transcribes speech -
+it only measures loudness.
 
 bash:
 

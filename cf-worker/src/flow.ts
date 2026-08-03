@@ -1,28 +1,43 @@
 import { decodeState, encodeState, type FlowState, type Step } from "./state";
 
+export interface Env {
+  TELNYX_API_KEY: string;
+  TELNYX_PUBLIC_KEY: string;
+  TELNYX_CONNECTION_ID: string;
+  TELNYX_FROM_NUMBER: string;
+  TRIGGER_SECRET: string;
+  CALL_SESSIONS: DurableObjectNamespace;
+}
+
 export interface Command {
   action: string;
   params: Record<string, unknown>;
-  /** Telnyx uses PUT for client_state_update; everything else is POST. */
   method?: "POST" | "PUT";
-}
-
-export interface TranscriptionPayload {
-  transcription_data?: {
-    is_final?: boolean;
-    transcript?: string;
-    confidence?: number;
-  };
 }
 
 export interface FlowInput {
   eventType: string;
   clientState: string | null | undefined;
   originUrl: string;
-  payload?: TranscriptionPayload;
+  silenceMs?: number | string | null;
 }
 
 export const QUESTION_COUNT = 3;
+
+/** Silence after speech that ends an answer. */
+export const DEFAULT_SILENCE_MS = 2500;
+const MIN_SILENCE_MS = 500;
+const MAX_SILENCE_MS = 10000;
+
+/** Hard cap so a caller who never speaks cannot hold the call open. */
+export const MAX_ANSWER_MS = 30000;
+
+export function normaliseSilenceMs(value: unknown): number {
+  const n = typeof value === "string" ? Number(value) : value;
+  if (typeof n !== "number" || !Number.isFinite(n)) return DEFAULT_SILENCE_MS;
+  if (n < MIN_SILENCE_MS || n > MAX_SILENCE_MS) return DEFAULT_SILENCE_MS;
+  return Math.round(n);
+}
 
 function audioUrl(origin: string, file: string): string {
   return `${origin}/audio/${file}`;
@@ -33,45 +48,56 @@ function play(origin: string, file: string, step: Step): Command {
     action: "playback_start",
     params: {
       audio_url: audioUrl(origin, file),
-      client_state: encodeState({ step, phase: "playing" }),
+      client_state: encodeState({ step }),
     },
   };
 }
 
-function question(origin: string, step: 1 | 2 | 3): Command {
+export function question(origin: string, step: 1 | 2 | 3): Command {
   return play(origin, `q${step}.mp3`, step);
 }
 
+/**
+ * What to play once an answer ends. Shared with the Durable Object, which is
+ * what actually detects the end of speech and issues this command.
+ */
+export function nextAfterAnswer(origin: string, answeredStep: 1 | 2 | 3): Command {
+  if (answeredStep < QUESTION_COUNT) {
+    return question(origin, (answeredStep + 1) as 1 | 2 | 3);
+  }
+  return play(origin, "thanks.mp3", "done");
+}
+
 export function decide(input: FlowInput): Command[] {
-  const { eventType, clientState, originUrl, payload } = input;
+  const { eventType, clientState, originUrl } = input;
+  const silenceMs = normaliseSilenceMs(input.silenceMs);
   const state: FlowState | null = decodeState(clientState);
 
   if (eventType === "call.answered") {
+    const streamUrl = new URL(originUrl.replace(/^http/, "ws"));
+    streamUrl.pathname = "/stream";
+    streamUrl.searchParams.set("silenceMs", String(silenceMs));
+
     return [
       {
         action: "record_start",
         params: {
           format: "mp3",
           channels: "dual",
-          client_state: encodeState({ step: 1, phase: "playing" }),
+          client_state: encodeState({ step: 1 }),
         },
       },
       {
-        action: "transcription_start",
+        action: "streaming_start",
         params: {
-          // Only the caller's audio. Our own playbacks must never transcribe,
-          // or a question would advance the flow past itself.
-          transcription_tracks: "inbound",
-          interim_results: false,
-          // Telnyx's own engine is the one that supports auto_detect. The
-          // config block repeats transcription_engine as its discriminator.
-          transcription_engine: "Telnyx",
-          transcription_engine_config: {
-            transcription_engine: "Telnyx",
-            language: "auto_detect",
-            transcription_model: "openai/whisper-large-v3-turbo",
-          },
-          client_state: encodeState({ step: 1, phase: "playing" }),
+          // Placeholder: the Worker rewrites this with the call_control_id,
+          // which decide() has no access to.
+          stream_url: streamUrl.toString(),
+          // The caller only. Our own playbacks are on the outbound track, so
+          // they can never be mistaken for the caller speaking.
+          stream_track: "inbound_track",
+          stream_codec: "PCMU",
+          client_state: encodeState({ step: 1 }),
         },
       },
       question(originUrl, 1),
@@ -80,36 +106,15 @@ export function decide(input: FlowInput): Command[] {
 
   if (!state) return [];
 
-  if (eventType === "call.playback.ended") {
-    if (state.step === "done") {
-      return [
-        {
-          action: "hangup",
-          params: { client_state: encodeState({ step: "done", phase: "playing" }) },
-        },
-      ];
-    }
-    // The question has finished; start accepting the answer.
+  // The Durable Object drives question-to-question movement. The Worker only
+  // has to end the call once the thank-you has played.
+  if (eventType === "call.playback.ended" && state.step === "done") {
     return [
       {
-        action: "client_state_update",
-        method: "PUT",
-        params: {
-          client_state: encodeState({ step: state.step, phase: "listening" }),
-        },
+        action: "hangup",
+        params: { client_state: encodeState({ step: "done" }) },
       },
     ];
-  }
-
-  if (eventType === "call.transcription") {
-    if (state.phase !== "listening") return [];
-    if (state.step === "done") return [];
-    if (payload?.transcription_data?.is_final !== true) return [];
-
-    if (state.step < QUESTION_COUNT) {
-      return [question(originUrl, (state.step + 1) as 1 | 2 | 3)];
-    }
-    return [play(originUrl, "thanks.mp3", "done")];
   }
 
   return [];

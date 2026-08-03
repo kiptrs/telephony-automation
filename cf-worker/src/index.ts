@@ -1,14 +1,10 @@
-import { decide, type TranscriptionPayload } from "./flow";
+import { decide, normaliseSilenceMs, type Command, type Env } from "./flow";
+import { decodeState } from "./state";
 import { createCall, sendCommand, TelnyxError } from "./telnyx";
 import { verifyTelnyxSignature } from "./verify";
 
-export interface Env {
-  TELNYX_API_KEY: string;
-  TELNYX_PUBLIC_KEY: string;
-  TELNYX_CONNECTION_ID: string;
-  TELNYX_FROM_NUMBER: string;
-  TRIGGER_SECRET: string;
-}
+export { CallSession } from "./session";
+export type { Env };
 
 interface TelnyxWebhook {
   data?: {
@@ -41,6 +37,24 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+function sessionFor(env: Env, callControlId: string): DurableObjectStub {
+  return env.CALL_SESSIONS.get(env.CALL_SESSIONS.idFromName(callControlId));
+}
+
+/**
+ * decide() cannot build the stream URL alone: it needs the call_control_id so
+ * the media socket lands on the same Durable Object the webhooks address.
+ */
+function withCallId(command: Command, callControlId: string, origin: string): Command {
+  if (command.action !== "streaming_start") return command;
+
+  const url = new URL(String(command.params.stream_url));
+  url.searchParams.set("ccid", callControlId);
+  url.searchParams.set("origin", origin);
+
+  return { ...command, params: { ...command.params, stream_url: url.toString() } };
+}
+
 async function handleWebhook(request: Request, env: Env): Promise<Response> {
   const rawBody = await request.text();
 
@@ -63,6 +77,7 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
   const callControlId = webhook.data?.payload?.call_control_id;
   if (!eventType || !callControlId) return json({ ok: true });
 
+  const clientState = webhook.data?.payload?.client_state;
   console.log(
     JSON.stringify({
       msg: "webhook",
@@ -72,28 +87,51 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
     }),
   );
 
+  const requestUrl = new URL(request.url);
+  const origin = requestUrl.origin;
+
+  // A question has finished playing: tell the session to start listening for
+  // the answer. This is the only trigger that starts voice detection.
+  if (eventType === "call.playback.ended") {
+    const state = decodeState(clientState);
+    if (state && state.step !== "done") {
+      await sessionFor(env, callControlId).fetch(
+        `https://session/arm?step=${state.step}`,
+      );
+    }
+  }
+
   const commands = decide({
     eventType,
-    clientState: webhook.data?.payload?.client_state,
-    originUrl: new URL(request.url).origin,
-    payload: webhook.data?.payload as TranscriptionPayload | undefined,
+    clientState,
+    originUrl: origin,
+    silenceMs: requestUrl.searchParams.get("silenceMs"),
   });
 
   for (const command of commands) {
+    const finalCommand = withCallId(command, callControlId, origin);
     try {
-      await sendCommand(callControlId, command, env.TELNYX_API_KEY);
+      const result = await sendCommand(callControlId, finalCommand, env.TELNYX_API_KEY);
+      console.log(
+        JSON.stringify({
+          msg: "command_sent",
+          action: finalCommand.action,
+          params: finalCommand.params,
+          response: result.slice(0, 500),
+        }),
+      );
     } catch (error) {
       const status = error instanceof TelnyxError ? error.status : 0;
       console.log(
         JSON.stringify({
           msg: "command_failed",
-          action: command.action,
+          action: finalCommand.action,
           status,
           error: String(error),
         }),
       );
       // Do not leave the callee on a silent open line.
-      if (command.action !== "hangup") {
+      if (finalCommand.action !== "hangup") {
         try {
           await sendCommand(
             callControlId,
@@ -119,9 +157,9 @@ async function handleCreateCall(request: Request, env: Env): Promise<Response> {
     return json({ error: "unauthorized" }, 401);
   }
 
-  let body: { to?: unknown };
+  let body: { to?: unknown; silenceMs?: unknown };
   try {
-    body = (await request.json()) as { to?: unknown };
+    body = (await request.json()) as { to?: unknown; silenceMs?: unknown };
   } catch {
     return json({ error: "invalid json" }, 400);
   }
@@ -131,17 +169,21 @@ async function handleCreateCall(request: Request, env: Env): Promise<Response> {
     return json({ error: "`to` is required" }, 400);
   }
 
+  const silenceMs = normaliseSilenceMs(body.silenceMs);
   const origin = new URL(request.url).origin;
+
+  const webhookUrl = new URL(`${origin}/webhooks/telnyx`);
+  webhookUrl.searchParams.set("silenceMs", String(silenceMs));
 
   try {
     const callControlId = await createCall({
       to,
       from: env.TELNYX_FROM_NUMBER,
       connectionId: env.TELNYX_CONNECTION_ID,
-      webhookUrl: `${origin}/webhooks/telnyx`,
+      webhookUrl: webhookUrl.toString(),
       apiKey: env.TELNYX_API_KEY,
     });
-    return json({ call_control_id: callControlId });
+    return json({ call_control_id: callControlId, silenceMs });
   } catch (error) {
     const status = error instanceof TelnyxError ? error.status : 502;
     return json({ error: String(error) }, status >= 400 && status < 600 ? status : 502);
@@ -150,13 +192,20 @@ async function handleCreateCall(request: Request, env: Env): Promise<Response> {
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
-    const { pathname } = new URL(request.url);
+    const url = new URL(request.url);
 
-    if (request.method === "POST" && pathname === "/webhooks/telnyx") {
+    if (request.method === "POST" && url.pathname === "/webhooks/telnyx") {
       return handleWebhook(request, env);
     }
-    if (request.method === "POST" && pathname === "/calls") {
+    if (request.method === "POST" && url.pathname === "/calls") {
       return handleCreateCall(request, env);
+    }
+    // Telnyx's media stream. Routed to the session for this call so the audio
+    // and the webhooks reach the same object.
+    if (url.pathname === "/stream") {
+      const ccid = url.searchParams.get("ccid");
+      if (!ccid) return json({ error: "ccid required" }, 400);
+      return sessionFor(env, ccid).fetch(request);
     }
     return json({ error: "not found" }, 404);
   },
