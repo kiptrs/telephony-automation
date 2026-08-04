@@ -4,21 +4,44 @@ import {
   decide,
   nextAfterAnswer,
   normaliseSilenceMs,
+  question,
+  type AudioManifest,
   type FlowInput,
 } from "../src/flow";
 import { decodeState, encodeState, type FlowState } from "../src/state";
 
 const ORIGIN = "https://rtc-telnyx.example.workers.dev";
 
+const AUDIO: AudioManifest = {
+  questions: [
+    "https://cdn.example/a/q1.mp3",
+    "https://cdn.example/a/q2.mp3",
+    "https://cdn.example/a/q3.mp3",
+  ],
+  thanks: "https://cdn.example/a/thanks.mp3",
+};
+
+function manifestOf(count: number): AudioManifest {
+  return {
+    questions: Array.from(
+      { length: count },
+      (_, i) => `https://cdn.example/q${i + 1}.mp3`,
+    ),
+    thanks: "https://cdn.example/thanks.mp3",
+  };
+}
+
 function run(
   eventType: string,
   state: FlowState | null = null,
   silenceMs?: FlowInput["silenceMs"],
+  audio: AudioManifest | undefined = AUDIO,
 ) {
   return decide({
     eventType,
     clientState: state ? encodeState(state) : null,
     originUrl: ORIGIN,
+    audio,
     silenceMs,
   });
 }
@@ -61,49 +84,102 @@ describe("decide - call start", () => {
     expect(url.searchParams.get("silenceMs")).toBe(String(DEFAULT_SILENCE_MS));
   });
 
-  it("starts question 1 at step 1", () => {
-    const playback = run("call.answered").find((c) => c.action === "playback_start");
-    expect(playback!.params.audio_url).toBe(`${ORIGIN}/audio/q1.mp3`);
-    expect(decodeState(playback!.params.client_state as string)).toEqual({ step: 1 });
+  it("plays the manifest's first question at step 1", () => {
+    const playback = run("call.answered").find(
+      (c) => c.action === "playback_start",
+    );
+    expect(playback!.params.audio_url).toBe(AUDIO.questions[0]);
+    expect(decodeState(playback!.params.client_state as string)).toEqual({
+      step: 1,
+    });
+  });
+
+  // decide() is called directly here: run()'s `audio` parameter defaults to
+  // AUDIO, so passing undefined through it would silently supply the default.
+  it("does nothing at all without a manifest", () => {
+    expect(
+      decide({ eventType: "call.answered", clientState: null, originUrl: ORIGIN }),
+    ).toEqual([]);
+  });
+
+  it("does not start recording or streaming when the manifest has no questions", () => {
+    const empty: AudioManifest = {
+      questions: [],
+      thanks: "https://cdn.example/t.mp3",
+    };
+    expect(run("call.answered", null, undefined, empty)).toEqual([]);
   });
 
   it("involves no AI, speech synthesis, or transcription", () => {
     const everything = [
       ...run("call.answered"),
       ...run("call.playback.ended", { step: "done" }),
-      nextAfterAnswer(ORIGIN, 1),
-      nextAfterAnswer(ORIGIN, 3),
+      nextAfterAnswer(AUDIO, 1),
+      nextAfterAnswer(AUDIO, 3),
     ];
     for (const c of everything) {
-      expect(c.action).not.toContain("ai");
-      expect(c.action).not.toContain("speak");
-      expect(c.action).not.toContain("transcription");
-      expect(c.action).not.toContain("gather");
-      expect(c.params).not.toHaveProperty("voice");
+      expect(c).not.toBeNull();
+      expect(c!.action).not.toContain("ai");
+      expect(c!.action).not.toContain("speak");
+      expect(c!.action).not.toContain("transcription");
+      expect(c!.action).not.toContain("gather");
+      expect(c!.params).not.toHaveProperty("voice");
     }
+  });
+});
+
+describe("question", () => {
+  it("is 1-based against a 0-based array", () => {
+    expect(question(AUDIO, 2)!.params.audio_url).toBe(AUDIO.questions[1]);
+  });
+
+  it.each([0, -1, 4])("returns null for out-of-range step %i", (step) => {
+    expect(question(AUDIO, step)).toBeNull();
   });
 });
 
 describe("nextAfterAnswer", () => {
   it.each([
-    [1, 2],
-    [2, 3],
-  ] as const)("plays question %i+1 after answer %i", (from, to) => {
-    const command = nextAfterAnswer(ORIGIN, from);
+    [1, 1],
+    [2, 2],
+  ] as const)("plays the next question after answer %i", (from, index) => {
+    const command = nextAfterAnswer(AUDIO, from)!;
 
     expect(command.action).toBe("playback_start");
-    expect(command.params.audio_url).toBe(`${ORIGIN}/audio/q${to}.mp3`);
-    expect(decodeState(command.params.client_state as string)).toEqual({ step: to });
+    expect(command.params.audio_url).toBe(AUDIO.questions[index]);
+    expect(decodeState(command.params.client_state as string)).toEqual({
+      step: from + 1,
+    });
   });
 
-  it("plays the thank-you after the third answer", () => {
-    const command = nextAfterAnswer(ORIGIN, 3);
+  it("plays the thank-you after the last answer", () => {
+    const command = nextAfterAnswer(AUDIO, 3)!;
 
     expect(command.action).toBe("playback_start");
-    expect(command.params.audio_url).toBe(`${ORIGIN}/audio/thanks.mp3`);
+    expect(command.params.audio_url).toBe(AUDIO.thanks);
     expect(decodeState(command.params.client_state as string)).toEqual({
       step: "done",
     });
+  });
+
+  it("plays the thank-you immediately in a one-question survey", () => {
+    const one = manifestOf(1);
+    const command = nextAfterAnswer(one, 1)!;
+    expect(command.params.audio_url).toBe(one.thanks);
+  });
+
+  it("walks all ten questions then the thank-you", () => {
+    const ten = manifestOf(10);
+    for (let step = 1; step < 10; step++) {
+      expect(nextAfterAnswer(ten, step)!.params.audio_url).toBe(
+        ten.questions[step],
+      );
+    }
+    expect(nextAfterAnswer(ten, 10)!.params.audio_url).toBe(ten.thanks);
+  });
+
+  it.each([0, -1, 4])("returns null for out-of-range step %i", (step) => {
+    expect(nextAfterAnswer(AUDIO, step)).toBeNull();
   });
 });
 
@@ -141,6 +217,7 @@ describe("decide - events that must not produce commands", () => {
         eventType: "call.playback.ended",
         clientState: "!!!garbage!!!",
         originUrl: ORIGIN,
+        audio: AUDIO,
       }),
     ).toEqual([]);
   });

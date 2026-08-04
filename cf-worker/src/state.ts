@@ -1,10 +1,11 @@
-export type Step = 1 | 2 | 3 | "done";
+export type Step = number | "done";
 
 export interface FlowState {
   step: Step;
 }
 
-const VALID_STEPS: readonly unknown[] = [1, 2, 3, "done"];
+/** Upper bound on questions in one survey. Also bounds what client_state accepts. */
+export const MAX_QUESTIONS = 10;
 
 export function encodeState(state: FlowState): string {
   return btoa(JSON.stringify(state));
@@ -30,7 +31,17 @@ export function decodeState(raw: string | null | undefined): FlowState | null {
   if (typeof parsed !== "object" || parsed === null) return null;
 
   const step = (parsed as { step?: unknown }).step;
-  if (!VALID_STEPS.includes(step)) return null;
 
-  return { step: step as Step };
+  if (step === "done") return { step: "done" };
+
+  if (
+    typeof step === "number" &&
+    Number.isInteger(step) &&
+    step >= 1 &&
+    step <= MAX_QUESTIONS
+  ) {
+    return { step };
+  }
+
+  return null;
 }

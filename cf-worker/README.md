@@ -5,8 +5,11 @@ Cloudflare Worker driving a three-question voice survey over a Telnyx number.
 ## Flow
 
 Outbound call answered -> dual-channel recording + media stream opened ->
-`q1.mp3` -> caller answers -> `q2.mp3` -> answers -> `q3.mp3` -> answers ->
-`thanks.mp3` -> hangup.
+question 1 -> caller answers -> question 2 -> answers -> ... -> thank-you ->
+hangup.
+
+The audio is supplied per call, 1 to 10 questions plus a thank-you. Nothing is
+bundled with the Worker.
 
 Answers end when the caller **stops speaking for `silenceMs`** (default 2500).
 Detection is done here, not by Telnyx: `streaming_start` forks the caller's
@@ -18,9 +21,10 @@ inbound audio to a WebSocket, and a Durable Object measures the energy of each
 | Piece | Owns |
 |---|---|
 | `src/vad.ts` | mu-law decoding and the silence decision. Pure, fully unit tested. |
-| `src/session.ts` | `CallSession` Durable Object: the media socket and per-call VAD state. Plays the next question when an answer ends. |
+| `src/session.ts` | `CallSession` Durable Object: the media socket, per-call VAD state, and the audio manifest. Plays the next question when an answer ends. |
 | `src/flow.ts` | Call setup and hangup. Pure. |
-| `src/index.ts` | Routing; arms the session when a question finishes playing. |
+| `src/manifest.ts` | Validating the per-call audio manifest, including SigV4 expiry. Pure, fully unit tested. |
+| `src/index.ts` | Routing; validates and seeds the manifest, arms the session when a question finishes playing. |
 
 The Worker itself stays stateless. Only the Durable Object holds state, because
 silence is only observable by watching a live stream over time.
@@ -76,7 +80,18 @@ per call, but setting it in the portal keeps the two consistent.
 PowerShell (note: `curl` is an alias for `Invoke-WebRequest` and will not accept
 `-H`; use `Invoke-RestMethod` or the real `curl.exe`):
 
-    Invoke-RestMethod -Uri "https://<worker-host>/calls" -Method Post -Headers @{ Authorization = "Bearer $env:TRIGGER_SECRET" } -ContentType "application/json" -Body '{"to":"+37060000000"}'
+    Invoke-RestMethod -Uri "https://<worker-host>/calls" -Method Post -Headers @{ Authorization = "Bearer $env:TRIGGER_SECRET" } -ContentType "application/json" -Body '{"to":"+37060000000","audio":{"questions":["https://bucket.s3.amazonaws.com/q1.mp3?X-Amz-..."],"thanks":"https://bucket.s3.amazonaws.com/thanks.mp3?X-Amz-..."}}'
+
+### Audio
+
+`audio` is required. `questions` holds 1 to 10 HTTPS URLs; `thanks` is a single
+HTTPS URL. Telnyx fetches each one at the moment it plays, so pre-signed URLs
+must stay valid for the whole call - sign for 60 minutes. The Worker rejects the
+request without dialling if a SigV4 URL has too little life left, computed from
+the question count.
+
+`http:` is rejected outright: Telnyx needs public HTTPS anyway, and a pre-signed
+URL sent in clear text leaks its own signature.
 
 ### Silence threshold
 
@@ -97,15 +112,25 @@ bash:
     curl -X POST https://<worker-host>/calls \
       -H "Authorization: Bearer $TRIGGER_SECRET" \
       -H "Content-Type: application/json" \
-      -d '{"to":"+37060000000"}'
+      -d '{
+            "to": "+37060000000",
+            "audio": {
+              "questions": ["https://bucket.s3.amazonaws.com/q1.mp3?X-Amz-...", "https://bucket.s3.amazonaws.com/q2.mp3?X-Amz-..."],
+              "thanks": "https://bucket.s3.amazonaws.com/thanks.mp3?X-Amz-..."
+            }
+          }'
 
 Watch it run with `npx wrangler tail`.
 
 ## Audio
 
-`public/audio/` currently holds four three-second silent placeholders so the
-flow is testable before real audio exists. Replace them with real recordings.
-Because audio ships as Worker assets, changing a recording requires a redeploy.
+Audio is supplied per call, not bundled. The caller of `POST /calls` passes
+HTTPS URLs; nothing is served from this Worker. `public/audio/` still holds the
+original silent placeholders but the flow no longer reads them.
+
+Telnyx fetches each URL over public HTTPS at the moment it plays, so the URLs
+must be reachable from the internet and must outlive the call. Replacing a
+recording no longer requires a redeploy - it is entirely the caller's concern.
 
 ## Tests
 
@@ -118,6 +143,10 @@ runtime.
 
 ## Known limitations
 
-- There is a round-trip gap between `call.playback.ended` and `gather_using_ai`
-  beginning to listen. Answering instantly may clip the first word.
-- `gather_using_ai` is billed at AI rates, not plain call rates.
+- There is a round-trip gap between `call.playback.ended` and the session being
+  armed. Answering instantly may clip the first word.
+- A pre-signed URL valid at dial time can still expire before the thank-you
+  plays. The runway check at `POST /calls` shrinks this window but cannot close
+  it.
+- A call that never produces a `call.hangup` webhook leaves its manifest in
+  Durable Object storage.

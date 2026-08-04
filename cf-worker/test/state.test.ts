@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { decodeState, encodeState, type FlowState } from "../src/state";
+import {
+  decodeState,
+  encodeState,
+  MAX_QUESTIONS,
+  type FlowState,
+} from "../src/state";
 
 describe("encodeState / decodeState", () => {
   it("round-trips every valid step", () => {
-    const steps: FlowState["step"][] = [1, 2, 3, "done"];
+    const steps: FlowState["step"][] = [1, 2, 3, 9, MAX_QUESTIONS, "done"];
     for (const step of steps) {
       expect(decodeState(encodeState({ step }))).toEqual({ step });
     }
@@ -28,7 +33,13 @@ describe("encodeState / decodeState", () => {
   });
 
   it("returns null for an out-of-range step", () => {
-    expect(decodeState(btoa(JSON.stringify({ step: 9 })))).toBeNull();
+    expect(decodeState(btoa(JSON.stringify({ step: 0 })))).toBeNull();
+    expect(decodeState(btoa(JSON.stringify({ step: -1 })))).toBeNull();
+    expect(
+      decodeState(btoa(JSON.stringify({ step: MAX_QUESTIONS + 1 }))),
+    ).toBeNull();
+    expect(decodeState(btoa(JSON.stringify({ step: 1.5 })))).toBeNull();
+    expect(decodeState(btoa(JSON.stringify({ step: "3" })))).toBeNull();
     expect(decodeState(btoa(JSON.stringify({ step: "nope" })))).toBeNull();
     expect(decodeState(btoa(JSON.stringify({})))).toBeNull();
   });

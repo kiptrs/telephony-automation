@@ -1,4 +1,11 @@
-import { decide, normaliseSilenceMs, type Command, type Env } from "./flow";
+import {
+  decide,
+  normaliseSilenceMs,
+  type AudioManifest,
+  type Command,
+  type Env,
+} from "./flow";
+import { parseManifest } from "./manifest";
 import { decodeState } from "./state";
 import { createCall, sendCommand, TelnyxError } from "./telnyx";
 import { verifyTelnyxSignature } from "./verify";
@@ -41,16 +48,38 @@ function sessionFor(env: Env, callControlId: string): DurableObjectStub {
   return env.CALL_SESSIONS.get(env.CALL_SESSIONS.idFromName(callControlId));
 }
 
+async function manifestFor(
+  env: Env,
+  callControlId: string,
+): Promise<AudioManifest | null> {
+  const response = await sessionFor(env, callControlId).fetch(
+    "https://session/manifest",
+  );
+  if (!response.ok) return null;
+  return (await response.json()) as AudioManifest;
+}
+
+async function hangUp(env: Env, callControlId: string): Promise<void> {
+  try {
+    await sendCommand(
+      callControlId,
+      { action: "hangup", params: {} },
+      env.TELNYX_API_KEY,
+    );
+  } catch {
+    // Nothing further we can do.
+  }
+}
+
 /**
  * decide() cannot build the stream URL alone: it needs the call_control_id so
  * the media socket lands on the same Durable Object the webhooks address.
  */
-function withCallId(command: Command, callControlId: string, origin: string): Command {
+function withCallId(command: Command, callControlId: string): Command {
   if (command.action !== "streaming_start") return command;
 
   const url = new URL(String(command.params.stream_url));
   url.searchParams.set("ccid", callControlId);
-  url.searchParams.set("origin", origin);
 
   return { ...command, params: { ...command.params, stream_url: url.toString() } };
 }
@@ -101,17 +130,45 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
     }
   }
 
+  // Per-call manifests must not accumulate in Durable Object storage.
+  if (eventType === "call.hangup") {
+    await sessionFor(env, callControlId).fetch("https://session/end", {
+      method: "POST",
+    });
+  }
+
+  // Only call.answered needs the manifest, so only it pays for the round trip.
+  let audio: AudioManifest | undefined;
+  if (eventType === "call.answered") {
+    audio = (await manifestFor(env, callControlId)) ?? undefined;
+    if (!audio) {
+      console.log(
+        JSON.stringify({
+          msg: "manifest_missing",
+          call_control_id: callControlId,
+        }),
+      );
+      await hangUp(env, callControlId);
+      return json({ ok: true });
+    }
+  }
+
   const commands = decide({
     eventType,
     clientState,
     originUrl: origin,
+    audio,
     silenceMs: requestUrl.searchParams.get("silenceMs"),
   });
 
   for (const command of commands) {
-    const finalCommand = withCallId(command, callControlId, origin);
+    const finalCommand = withCallId(command, callControlId);
     try {
-      const result = await sendCommand(callControlId, finalCommand, env.TELNYX_API_KEY);
+      const result = await sendCommand(
+        callControlId,
+        finalCommand,
+        env.TELNYX_API_KEY,
+      );
       console.log(
         JSON.stringify({
           msg: "command_sent",
@@ -132,15 +189,7 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
       );
       // Do not leave the callee on a silent open line.
       if (finalCommand.action !== "hangup") {
-        try {
-          await sendCommand(
-            callControlId,
-            { action: "hangup", params: {} },
-            env.TELNYX_API_KEY,
-          );
-        } catch {
-          // Nothing further we can do.
-        }
+        await hangUp(env, callControlId);
       }
       break;
     }
@@ -157,9 +206,13 @@ async function handleCreateCall(request: Request, env: Env): Promise<Response> {
     return json({ error: "unauthorized" }, 401);
   }
 
-  let body: { to?: unknown; silenceMs?: unknown };
+  let body: { to?: unknown; silenceMs?: unknown; audio?: unknown };
   try {
-    body = (await request.json()) as { to?: unknown; silenceMs?: unknown };
+    body = (await request.json()) as {
+      to?: unknown;
+      silenceMs?: unknown;
+      audio?: unknown;
+    };
   } catch {
     return json({ error: "invalid json" }, 400);
   }
@@ -169,25 +222,47 @@ async function handleCreateCall(request: Request, env: Env): Promise<Response> {
     return json({ error: "`to` is required" }, 400);
   }
 
+  const parsed = parseManifest(body.audio);
+  if ("error" in parsed) {
+    return json({ error: `${parsed.error.field} ${parsed.error.reason}` }, 400);
+  }
+
   const silenceMs = normaliseSilenceMs(body.silenceMs);
   const origin = new URL(request.url).origin;
 
   const webhookUrl = new URL(`${origin}/webhooks/telnyx`);
   webhookUrl.searchParams.set("silenceMs", String(silenceMs));
 
+  let callControlId: string;
   try {
-    const callControlId = await createCall({
+    callControlId = await createCall({
       to,
       from: env.TELNYX_FROM_NUMBER,
       connectionId: env.TELNYX_CONNECTION_ID,
       webhookUrl: webhookUrl.toString(),
       apiKey: env.TELNYX_API_KEY,
     });
-    return json({ call_control_id: callControlId, silenceMs });
   } catch (error) {
     const status = error instanceof TelnyxError ? error.status : 502;
     return json({ error: String(error) }, status >= 400 && status < 600 ? status : 502);
   }
+
+  // Seeding can only happen after the dial, because the call_control_id does
+  // not exist until then. A live call with no audio is worse than a dropped
+  // one, so a seeding failure hangs up the call we just placed.
+  const seeded = await sessionFor(env, callControlId).fetch(
+    "https://session/init",
+    { method: "POST", body: JSON.stringify(parsed.manifest) },
+  );
+  if (!seeded.ok) {
+    console.log(
+      JSON.stringify({ msg: "seed_failed", call_control_id: callControlId }),
+    );
+    await hangUp(env, callControlId);
+    return json({ error: "failed to seed call session" }, 502);
+  }
+
+  return json({ call_control_id: callControlId, silenceMs });
 }
 
 export default {

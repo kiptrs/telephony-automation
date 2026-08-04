@@ -9,6 +9,12 @@ export interface Env {
   CALL_SESSIONS: DurableObjectNamespace;
 }
 
+/** The audio for one call. Supplied per call, validated in manifest.ts. */
+export interface AudioManifest {
+  questions: string[];
+  thanks: string;
+}
+
 export interface Command {
   action: string;
   params: Record<string, unknown>;
@@ -18,11 +24,12 @@ export interface Command {
 export interface FlowInput {
   eventType: string;
   clientState: string | null | undefined;
+  /** Used only to build the stream URL. No longer an audio concern. */
   originUrl: string;
+  /** Required for call.answered, unused for every other event. */
+  audio?: AudioManifest;
   silenceMs?: number | string | null;
 }
-
-export const QUESTION_COUNT = 3;
 
 /** Silence after speech that ends an answer. */
 export const DEFAULT_SILENCE_MS = 2500;
@@ -39,41 +46,51 @@ export function normaliseSilenceMs(value: unknown): number {
   return Math.round(n);
 }
 
-function audioUrl(origin: string, file: string): string {
-  return `${origin}/audio/${file}`;
-}
-
-function play(origin: string, file: string, step: Step): Command {
+function play(audioUrl: string, step: Step): Command {
   return {
     action: "playback_start",
     params: {
-      audio_url: audioUrl(origin, file),
+      audio_url: audioUrl,
       client_state: encodeState({ step }),
     },
   };
 }
 
-export function question(origin: string, step: 1 | 2 | 3): Command {
-  return play(origin, `q${step}.mp3`, step);
+/** `step` is 1-based; the questions array is 0-based. Null means out of range. */
+export function question(audio: AudioManifest, step: number): Command | null {
+  const url = audio.questions[step - 1];
+  if (!url) return null;
+  return play(url, step);
 }
 
 /**
  * What to play once an answer ends. Shared with the Durable Object, which is
  * what actually detects the end of speech and issues this command.
  */
-export function nextAfterAnswer(origin: string, answeredStep: 1 | 2 | 3): Command {
-  if (answeredStep < QUESTION_COUNT) {
-    return question(origin, (answeredStep + 1) as 1 | 2 | 3);
+export function nextAfterAnswer(
+  audio: AudioManifest,
+  answeredStep: number,
+): Command | null {
+  if (answeredStep < 1 || answeredStep > audio.questions.length) return null;
+  if (answeredStep < audio.questions.length) {
+    return question(audio, answeredStep + 1);
   }
-  return play(origin, "thanks.mp3", "done");
+  return play(audio.thanks, "done");
 }
 
 export function decide(input: FlowInput): Command[] {
-  const { eventType, clientState, originUrl } = input;
+  const { eventType, clientState, originUrl, audio } = input;
   const silenceMs = normaliseSilenceMs(input.silenceMs);
   const state: FlowState | null = decodeState(clientState);
 
   if (eventType === "call.answered") {
+    if (!audio) return [];
+
+    const first = question(audio, 1);
+    // A recording and a live media stream with nothing to play is worse than
+    // no call at all.
+    if (!first) return [];
+
     const streamUrl = new URL(originUrl.replace(/^http/, "ws"));
     streamUrl.pathname = "/stream";
     streamUrl.searchParams.set("silenceMs", String(silenceMs));
@@ -100,7 +117,7 @@ export function decide(input: FlowInput): Command[] {
           client_state: encodeState({ step: 1 }),
         },
       },
-      question(originUrl, 1),
+      first,
     ];
   }
 
