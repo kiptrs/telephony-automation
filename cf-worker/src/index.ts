@@ -5,6 +5,7 @@ import {
   type Command,
   type Env,
 } from "./flow";
+import { notify, type CallbackEvent } from "./callback";
 import { parseManifest } from "./manifest";
 import { decodeState } from "./state";
 import { createCall, sendCommand, TelnyxError } from "./telnyx";
@@ -84,7 +85,20 @@ function withCallId(command: Command, callControlId: string): Command {
   return { ...command, params: { ...command.params, stream_url: url.toString() } };
 }
 
-async function handleWebhook(request: Request, env: Env): Promise<Response> {
+/** Telnyx will reject a bad number anyway; catching it here saves a billed dial. */
+const E164 = /^\+[1-9][0-9]{6,14}$/;
+
+const CALLBACK_EVENTS = new Set([
+  "call.answered",
+  "call.hangup",
+  "call.recording.saved",
+]);
+
+async function handleWebhook(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const rawBody = await request.text();
 
   const valid = await verifyTelnyxSignature({
@@ -118,6 +132,23 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
 
   const requestUrl = new URL(request.url);
   const origin = requestUrl.origin;
+
+  const callbackUrl = requestUrl.searchParams.get("cb");
+  if (callbackUrl && CALLBACK_EVENTS.has(eventType)) {
+    const state = decodeState(clientState);
+    const event: CallbackEvent = {
+      event: eventType,
+      call_control_id: callControlId,
+      occurred_at: new Date().toISOString(),
+      step: state?.step ?? null,
+      payload: webhook.data?.payload ?? {},
+    };
+    // waitUntil, not await: the console must never be able to delay or fail
+    // this handler's 200.
+    ctx.waitUntil(
+      notify({ url: callbackUrl, secret: env.CONSOLE_HMAC_SECRET, event }),
+    );
+  }
 
   // A question has finished playing: tell the session to start listening for
   // the answer. This is the only trigger that starts voice detection.
@@ -206,12 +237,20 @@ async function handleCreateCall(request: Request, env: Env): Promise<Response> {
     return json({ error: "unauthorized" }, 401);
   }
 
-  let body: { to?: unknown; silenceMs?: unknown; audio?: unknown };
+  let body: {
+    to?: unknown;
+    from?: unknown;
+    silenceMs?: unknown;
+    audio?: unknown;
+    callbackUrl?: unknown;
+  };
   try {
     body = (await request.json()) as {
       to?: unknown;
+      from?: unknown;
       silenceMs?: unknown;
       audio?: unknown;
+      callbackUrl?: unknown;
     };
   } catch {
     return json({ error: "invalid json" }, 400);
@@ -220,6 +259,29 @@ async function handleCreateCall(request: Request, env: Env): Promise<Response> {
   const to = body.to;
   if (typeof to !== "string" || to.length === 0) {
     return json({ error: "`to` is required" }, 400);
+  }
+
+  const from = body.from ?? env.TELNYX_FROM_NUMBER;
+  if (typeof from !== "string" || !E164.test(from)) {
+    return json({ error: "`from` must be an E.164 number" }, 400);
+  }
+
+  let callbackUrl: string | null = null;
+  if (body.callbackUrl !== undefined) {
+    if (typeof body.callbackUrl !== "string") {
+      return json({ error: "`callbackUrl` must be a string" }, 400);
+    }
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(body.callbackUrl);
+    } catch {
+      return json({ error: "`callbackUrl` is not a valid URL" }, 400);
+    }
+    // A signed callback sent in clear text leaks its own signature.
+    if (parsedUrl.protocol !== "https:") {
+      return json({ error: "`callbackUrl` must use https" }, 400);
+    }
+    callbackUrl = parsedUrl.toString();
   }
 
   const parsed = parseManifest(body.audio);
@@ -232,12 +294,13 @@ async function handleCreateCall(request: Request, env: Env): Promise<Response> {
 
   const webhookUrl = new URL(`${origin}/webhooks/telnyx`);
   webhookUrl.searchParams.set("silenceMs", String(silenceMs));
+  if (callbackUrl) webhookUrl.searchParams.set("cb", callbackUrl);
 
   let callControlId: string;
   try {
     callControlId = await createCall({
       to,
-      from: env.TELNYX_FROM_NUMBER,
+      from,
       connectionId: env.TELNYX_CONNECTION_ID,
       webhookUrl: webhookUrl.toString(),
       apiKey: env.TELNYX_API_KEY,
@@ -266,11 +329,11 @@ async function handleCreateCall(request: Request, env: Env): Promise<Response> {
 }
 
 export default {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (request.method === "POST" && url.pathname === "/webhooks/telnyx") {
-      return handleWebhook(request, env);
+      return handleWebhook(request, env, ctx);
     }
     if (request.method === "POST" && url.pathname === "/calls") {
       return handleCreateCall(request, env);

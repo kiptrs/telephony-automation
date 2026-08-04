@@ -44,6 +44,7 @@ function env(): Env {
   storedManifest = AUDIO;
   seedOk = true;
   seededManifest = null;
+  pending = [];
 
   const namespace = {
     idFromName: (name: string) => ({ name }),
@@ -72,14 +73,25 @@ function env(): Env {
     TELNYX_CONNECTION_ID: "conn-1",
     TELNYX_FROM_NUMBER: "+15550000000",
     TRIGGER_SECRET: "s3cret",
+    CONSOLE_HMAC_SECRET: "hmac-secret",
     CALL_SESSIONS: namespace as unknown as DurableObjectNamespace,
   };
 }
 
+/** Callbacks are dispatched through waitUntil, so tests collect and await them. */
+let pending: Promise<unknown>[] = [];
+
 const ctx = {
-  waitUntil: () => {},
+  waitUntil: (promise: Promise<unknown>) => {
+    pending.push(promise);
+  },
   passThroughOnException: () => {},
 } as unknown as ExecutionContext;
+
+async function settle(): Promise<void> {
+  await Promise.all(pending);
+  pending = [];
+}
 
 function fetchSpy() {
   // A fresh Response per call: sendCommand reads the body, and a body can only
@@ -476,5 +488,245 @@ describe("routing", () => {
       ctx,
     );
     expect(response.status).toBe(404);
+  });
+});
+
+describe("POST /calls with from and callbackUrl", () => {
+  it("dials from the supplied number instead of the env default", async () => {
+    const spy = fetchSpy();
+    vi.stubGlobal("fetch", spy);
+
+    await worker.fetch(
+      new Request("https://worker.example/calls", {
+        method: "POST",
+        headers: { Authorization: "Bearer s3cret" },
+        body: JSON.stringify({ to: "+37060000001", from: "+37069999999", audio: AUDIO }),
+      }),
+      env(),
+      ctx,
+    );
+
+    const body = JSON.parse(spy.mock.calls[0]![1].body) as { from: string };
+    expect(body.from).toBe("+37069999999");
+  });
+
+  it("falls back to TELNYX_FROM_NUMBER when from is omitted", async () => {
+    const spy = fetchSpy();
+    vi.stubGlobal("fetch", spy);
+
+    await worker.fetch(
+      new Request("https://worker.example/calls", {
+        method: "POST",
+        headers: { Authorization: "Bearer s3cret" },
+        body: JSON.stringify({ to: "+37060000001", audio: AUDIO }),
+      }),
+      env(),
+      ctx,
+    );
+
+    const body = JSON.parse(spy.mock.calls[0]![1].body) as { from: string };
+    expect(body.from).toBe("+15550000000");
+  });
+
+  it("rejects a from that is not E.164 rather than letting Telnyx fail", async () => {
+    const response = await worker.fetch(
+      new Request("https://worker.example/calls", {
+        method: "POST",
+        headers: { Authorization: "Bearer s3cret" },
+        body: JSON.stringify({ to: "+37060000001", from: "060000001", audio: AUDIO }),
+      }),
+      env(),
+      ctx,
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("puts the callback URL on the webhook query string", async () => {
+    const spy = fetchSpy();
+    vi.stubGlobal("fetch", spy);
+
+    await worker.fetch(
+      new Request("https://worker.example/calls", {
+        method: "POST",
+        headers: { Authorization: "Bearer s3cret" },
+        body: JSON.stringify({
+          to: "+37060000001",
+          audio: AUDIO,
+          callbackUrl: "https://console.example/callbacks/worker",
+        }),
+      }),
+      env(),
+      ctx,
+    );
+
+    const body = JSON.parse(spy.mock.calls[0]![1].body) as { webhook_url: string };
+    const url = new URL(body.webhook_url);
+    expect(url.searchParams.get("cb")).toBe(
+      "https://console.example/callbacks/worker",
+    );
+    expect(url.searchParams.get("silenceMs")).toBe("2500");
+  });
+
+  it("rejects an http callback URL, which would leak the signature", async () => {
+    const response = await worker.fetch(
+      new Request("https://worker.example/calls", {
+        method: "POST",
+        headers: { Authorization: "Bearer s3cret" },
+        body: JSON.stringify({
+          to: "+37060000001",
+          audio: AUDIO,
+          callbackUrl: "http://console.example/callbacks/worker",
+        }),
+      }),
+      env(),
+      ctx,
+    );
+    expect(response.status).toBe(400);
+  });
+});
+
+describe("callbacks", () => {
+  const CB = "https://console.example/callbacks/worker";
+
+  async function deliverWebhook(
+    eventType: string,
+    payload: Record<string, unknown>,
+    spy: ReturnType<typeof fetchSpy>,
+  ) {
+    const body = JSON.stringify({
+      data: { event_type: eventType, payload: { call_control_id: "ccid-1", ...payload } },
+    });
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const signature = bytesToB64(
+      (await crypto.subtle.sign(
+        "Ed25519",
+        privateKey,
+        new TextEncoder().encode(`${timestamp}|${body}`),
+      )) as ArrayBuffer,
+    );
+
+    vi.stubGlobal("fetch", spy);
+    const response = await worker.fetch(
+      new Request(`https://worker.example/webhooks/telnyx?silenceMs=2500&cb=${encodeURIComponent(CB)}`, {
+        method: "POST",
+        headers: {
+          "telnyx-signature-ed25519": signature,
+          "telnyx-timestamp": timestamp,
+        },
+        body,
+      }),
+      env(),
+      ctx,
+    );
+    await settle();
+    return response;
+  }
+
+  function callbackCalls(spy: ReturnType<typeof fetchSpy>) {
+    return spy.mock.calls.filter(([url]) => String(url) === CB);
+  }
+
+  it("reports call.answered", async () => {
+    const spy = fetchSpy();
+    await deliverWebhook("call.answered", {}, spy);
+    const calls = callbackCalls(spy);
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]![1].body).event).toBe("call.answered");
+  });
+
+  it("reports call.hangup with the step from client_state", async () => {
+    const spy = fetchSpy();
+    await deliverWebhook(
+      "call.hangup",
+      { client_state: encodeState({ step: 2 }), hangup_cause: "normal_clearing" },
+      spy,
+    );
+    const body = JSON.parse(callbackCalls(spy)[0]![1].body);
+    expect(body.step).toBe(2);
+    expect(body.payload.hangup_cause).toBe("normal_clearing");
+  });
+
+  it("reports step done when the thank-you finished, which means completed", async () => {
+    const spy = fetchSpy();
+    await deliverWebhook("call.hangup", { client_state: encodeState({ step: "done" }) }, spy);
+    expect(JSON.parse(callbackCalls(spy)[0]![1].body).step).toBe("done");
+  });
+
+  it("reports a null step for a call that was never answered", async () => {
+    const spy = fetchSpy();
+    await deliverWebhook("call.hangup", { hangup_cause: "no_answer" }, spy);
+    expect(JSON.parse(callbackCalls(spy)[0]![1].body).step).toBeNull();
+  });
+
+  it("reports call.recording.saved, which nothing handled before", async () => {
+    const spy = fetchSpy();
+    await deliverWebhook(
+      "call.recording.saved",
+      { recording_id: "rec-1", recording_urls: { mp3: "https://telnyx.example/r.mp3" } },
+      spy,
+    );
+    const body = JSON.parse(callbackCalls(spy)[0]![1].body);
+    expect(body.event).toBe("call.recording.saved");
+    expect(body.payload.recording_id).toBe("rec-1");
+  });
+
+  it("signs the callback with a timestamp and a sha256 header", async () => {
+    const spy = fetchSpy();
+    await deliverWebhook("call.answered", {}, spy);
+    const { headers } = callbackCalls(spy)[0]![1] as unknown as {
+      headers: Record<string, string>;
+    };
+    expect(headers["x-console-signature"]).toMatch(/^sha256=[0-9a-f]{64}$/);
+    expect(headers["x-console-timestamp"]).toMatch(/^\d+$/);
+  });
+
+  it("sends no callback when the request carries no cb parameter", async () => {
+    const spy = fetchSpy();
+    const body = JSON.stringify({
+      data: { event_type: "call.answered", payload: { call_control_id: "ccid-1" } },
+    });
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const signature = bytesToB64(
+      (await crypto.subtle.sign(
+        "Ed25519",
+        privateKey,
+        new TextEncoder().encode(`${timestamp}|${body}`),
+      )) as ArrayBuffer,
+    );
+    vi.stubGlobal("fetch", spy);
+    await worker.fetch(
+      new Request("https://worker.example/webhooks/telnyx?silenceMs=2500", {
+        method: "POST",
+        headers: {
+          "telnyx-signature-ed25519": signature,
+          "telnyx-timestamp": timestamp,
+        },
+        body,
+      }),
+      env(),
+      ctx,
+    );
+    await settle();
+    expect(callbackCalls(spy)).toHaveLength(0);
+  });
+
+  it("still returns 200 when the console rejects the callback", async () => {
+    const spy = vi.fn(async (url: string) =>
+      String(url) === CB
+        ? new Response("nope", { status: 500 })
+        : new Response("{}", { status: 200 }),
+    ) as unknown as ReturnType<typeof fetchSpy>;
+    const response = await deliverWebhook("call.answered", {}, spy);
+    // A non-2xx here would make Telnyx retry and double-advance the flow.
+    expect(response.status).toBe(200);
+  });
+
+  it("still returns 200 when the callback throws outright", async () => {
+    const spy = vi.fn(async (url: string) => {
+      if (String(url) === CB) throw new Error("network down");
+      return new Response("{}", { status: 200 });
+    }) as unknown as ReturnType<typeof fetchSpy>;
+    const response = await deliverWebhook("call.answered", {}, spy);
+    expect(response.status).toBe(200);
   });
 });

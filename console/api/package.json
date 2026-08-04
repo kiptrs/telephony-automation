@@ -1,0 +1,40 @@
+{
+  "name": "@console/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file=.env src/server.ts",
+    "cli": "tsx --env-file=.env src/cli/index.ts",
+    "worker": "tsx --env-file=.env src/worker.ts",
+    "worker:dev": "tsx watch --env-file=.env src/worker.ts",
+    "build:shared": "tsc -p ../packages/shared/tsconfig.json",
+    "pretypecheck": "npm run build:shared",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pretest": "npm run build:shared",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1102.0",
+    "@aws-sdk/s3-request-presigner": "^3.1102.0",
+    "@console/shared": "*",
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/multipart": "^10.1.0",
+    "argon2": "^0.45.1",
+    "csv-parse": "^7.0.2",
+    "fastify": "^5.11.2",
+    "fastify-raw-body": "^5.0.0",
+    "libphonenumber-js": "^1.13.10",
+    "openai": "^7.4.0",
+    "pg": "^8.22.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.20.3",
+    "tsx": "^4.23.5",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.10"
+  }
+}

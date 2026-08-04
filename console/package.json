@@ -1,0 +1,20 @@
+{
+  "name": "console",
+  "private": true,
+  "type": "module",
+  "workspaces": ["api", "web", "packages/*"],
+  "engines": { "node": "24.11.0" },
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "dev": "docker compose -f docker-compose.dev.yml up -d --build",
+    "dev:logs": "docker compose -f docker-compose.dev.yml logs -f api worker web",
+    "dev:cli": "docker compose -f docker-compose.dev.yml run --rm --no-deps api npx tsx api/src/cli/index.ts",
+    "dev:user": "npm run dev:cli -- create-user",
+    "dev:migrate": "docker compose -f docker-compose.dev.yml run --rm dbmate up",
+    "prod": "docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build",
+    "prod:logs": "docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f api worker",
+    "prod:cli": "docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm --no-deps api node api/dist/cli/index.js",
+    "prod:migrate": "docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm migrate up"
+  }
+}

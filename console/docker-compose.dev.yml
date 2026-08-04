@@ -1,0 +1,135 @@
+name: console-dev
+
+# The whole stack, one command:
+#
+#     docker compose -f docker-compose.dev.yml up
+#
+# Postgres, MinIO, a dbmate one-shot, the API, the worker, and the Vite dev
+# server. DIALER=fake, so dispatch, leasing, outcomes, ingest, and transcription
+# all run without Telnyx or a public callback URL.
+#
+# Source directories are bind-mounted and both Node processes watch them.
+# node_modules is baked into each image and shadowed by an anonymous volume, so
+# the container's Linux builds of argon2 and esbuild win over the host's win32
+# ones - never mount the host's node_modules in.
+
+x-api-env: &api-env
+  DATABASE_URL: postgres://console:console@postgres:5432/console?sslmode=disable
+  SESSION_SECRET: dev-session-secret-not-for-production-use
+  S3_BUCKET: console-dev
+  S3_REGION: us-east-1
+  S3_ENDPOINT: http://minio:9000
+  AWS_ACCESS_KEY_ID: console
+  AWS_SECRET_ACCESS_KEY: consoleconsole
+  NODE_ENV: development
+  # Where FakeDialer posts its synthesised callbacks. It runs inside the worker
+  # container, so this has to resolve on the compose network, not on the host.
+  PUBLIC_BASE_URL: http://api:3000
+  DIALER: ${DIALER:-fake}
+  WORKER_BASE_URL: ${WORKER_BASE_URL:-https://worker.invalid}
+  WORKER_TRIGGER_SECRET: ${WORKER_TRIGGER_SECRET:-dev-trigger-secret}
+  WORKER_HMAC_SECRET: ${WORKER_HMAC_SECRET:-dev-hmac-secret-at-least-32-characters}
+  TELNYX_API_KEY: ${TELNYX_API_KEY:-dev-telnyx-key}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-dev-openai-key}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: console
+      POSTGRES_PASSWORD: console
+      POSTGRES_DB: console
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U console"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: console
+      MINIO_ROOT_PASSWORD: consoleconsole
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["miniodata:/data"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 console consoleconsole &&
+      mc mb --ignore-existing local/console-dev &&
+      echo minio ready
+      "
+
+  dbmate:
+    image: ghcr.io/amacneil/dbmate:2
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgres://console:console@postgres:5432/console?sslmode=disable
+    volumes: ["./db:/db"]
+    command: ["--wait", "up"]
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+      target: dev
+    depends_on:
+      dbmate: { condition: service_completed_successfully }
+      minio-init: { condition: service_completed_successfully }
+    environment:
+      <<: *api-env
+      PORT: 3000
+    ports: ["3000:3000"]
+    command: ["npx", "tsx", "watch", "api/src/server.ts"]
+    volumes:
+      - ./api/src:/app/api/src
+      - /app/node_modules
+      - /app/api/node_modules
+
+  worker:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+      target: dev
+    depends_on:
+      dbmate: { condition: service_completed_successfully }
+      minio-init: { condition: service_completed_successfully }
+    environment: *api-env
+    command: ["npx", "tsx", "watch", "api/src/worker.ts"]
+    volumes:
+      - ./api/src:/app/api/src
+      - /app/node_modules
+      - /app/api/node_modules
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+      target: dev
+    depends_on: [api]
+    environment:
+      API_PROXY_TARGET: http://api:3000
+      VITE_POLL: "1"
+    ports: ["5173:5173"]
+    volumes:
+      - ./web/src:/app/web/src
+      - ./web/index.html:/app/web/index.html
+      - /app/node_modules
+      - /app/web/node_modules
+
+volumes:
+  pgdata:
+  miniodata:

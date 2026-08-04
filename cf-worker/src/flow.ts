@@ -6,6 +6,7 @@ export interface Env {
   TELNYX_CONNECTION_ID: string;
   TELNYX_FROM_NUMBER: string;
   TRIGGER_SECRET: string;
+  CONSOLE_HMAC_SECRET: string;
   CALL_SESSIONS: DurableObjectNamespace;
 }
 

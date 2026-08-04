@@ -61,11 +61,14 @@ Set the secrets:
     npx wrangler secret put TELNYX_CONNECTION_ID
     npx wrangler secret put TELNYX_FROM_NUMBER
     npx wrangler secret put TRIGGER_SECRET
+    npx wrangler secret put CONSOLE_HMAC_SECRET
 
 `TELNYX_PUBLIC_KEY` is the base64 Ed25519 public key from the Telnyx portal.
 `TELNYX_CONNECTION_ID` is the Voice API application id.
 `TELNYX_FROM_NUMBER` is the Telnyx number you bought, in E.164.
 `TRIGGER_SECRET` is any long random string you choose.
+`CONSOLE_HMAC_SECRET` signs the callbacks described below; it must match the
+value the console holds.
 
 Deploy:
 
@@ -92,6 +95,26 @@ the question count.
 
 `http:` is rejected outright: Telnyx needs public HTTPS anyway, and a pre-signed
 URL sent in clear text leaks its own signature.
+
+### from and callbackUrl
+
+`from` is optional and overrides `TELNYX_FROM_NUMBER` for one call, which is how
+a caller-ID pool is driven from outside. It must be E.164.
+
+`callbackUrl` is optional and must be https. When present, the Worker POSTs
+`call.answered`, `call.hangup`, and `call.recording.saved` to it, signed with
+`CONSOLE_HMAC_SECRET`:
+
+    x-console-timestamp: <unix seconds>
+    x-console-signature: sha256=<hex HMAC-SHA256 of `${timestamp}.${rawBody}`>
+
+    { "event": "call.hangup", "call_control_id": "...",
+      "occurred_at": "...", "step": 2, "payload": { ... } }
+
+`step` is decoded from `client_state`: a number means the caller was on that
+question, `"done"` means the thank-you had played, and `null` means the call was
+never answered. Delivery is fire and forget through `ctx.waitUntil` - a console
+that is down can never stop this Worker returning 200 to Telnyx.
 
 ### Silence threshold
 

@@ -1,0 +1,101 @@
+name: console
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    image: ghcr.io/amacneil/dbmate:2
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    volumes: ["./db:/db"]
+    command: ["--wait", "up"]
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SESSION_SECRET: ${SESSION_SECRET}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_REGION: ${S3_REGION}
+      WORKER_BASE_URL: ${WORKER_BASE_URL}
+      WORKER_TRIGGER_SECRET: ${WORKER_TRIGGER_SECRET}
+      WORKER_HMAC_SECRET: ${WORKER_HMAC_SECRET}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      DIALER: cf-worker
+      TELNYX_API_KEY: ${TELNYX_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      NODE_ENV: production
+      PORT: 3000
+    # No S3_ENDPOINT and no AWS keys: the SDK uses the EC2 instance role.
+
+  # Exactly one worker container. Two would double the dial rate against the
+  # same pool - the locking makes that safe rather than corrupting, but it is
+  # not the intent.
+  worker:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SESSION_SECRET: ${SESSION_SECRET}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_REGION: ${S3_REGION}
+      WORKER_BASE_URL: ${WORKER_BASE_URL}
+      WORKER_TRIGGER_SECRET: ${WORKER_TRIGGER_SECRET}
+      WORKER_HMAC_SECRET: ${WORKER_HMAC_SECRET}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      DIALER: cf-worker
+      TELNYX_API_KEY: ${TELNYX_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      NODE_ENV: production
+    command: ["node", "api/dist/worker.js"]
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    # Mounted at /out, not /dist: mounting over /dist would hide the very
+    # assets this container exists to publish.
+    volumes: ["webdist:/out"]
+    command: ["sh", "-c", "rm -rf /out/* && cp -r /dist/. /out/ && echo web assets published"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [api, web]
+    ports: ["80:80", "443:443"]
+    environment:
+      CONSOLE_DOMAIN: ${CONSOLE_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - webdist:/srv:ro
+      - caddydata:/data
+      - caddyconfig:/config
+
+volumes:
+  pgdata:
+  webdist:
+  caddydata:
+  caddyconfig:

@@ -1,0 +1,19 @@
+{$CONSOLE_DOMAIN} {
+	encode gzip
+
+	# The API first, so it wins over the SPA fallback.
+	handle /api/* {
+		reverse_proxy api:3000
+	}
+
+	# Plan 2 adds /callbacks/worker here, reached by the Cloudflare Worker.
+	handle /callbacks/* {
+		reverse_proxy api:3000
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
