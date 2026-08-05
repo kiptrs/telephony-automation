@@ -51,18 +51,22 @@ Ten, five per environment:
     npm test                 vitest across all three workspaces
 
     npm run dev              build and start the whole dev stack, detached
+    npm run dev:down         stop and remove it, keeping the volumes
     npm run dev:logs         follow api, worker, web
     npm run dev:cli          account and number provisioning
     npm run dev:user         shorthand for `dev:cli -- create-user`
     npm run dev:migrate      dbmate up
 
     npm run prod             build and start the whole prod stack
+    npm run prod:down        stop and remove it, keeping the volumes
     npm run prod:logs        follow api, worker
     npm run prod:cli         the same CLI, compiled
     npm run prod:migrate     dbmate up
 
-Stopping is `docker compose -f docker-compose.dev.yml down`, with `-v` to drop
-the Postgres and MinIO volumes too.
+`dev:down` keeps `pgdata` and `miniodata`, so accounts, campaigns, and uploaded
+audio survive a restart. To start from an empty database:
+
+    docker compose -f docker-compose.dev.yml down -v
 
 ### Running on the host instead
 
