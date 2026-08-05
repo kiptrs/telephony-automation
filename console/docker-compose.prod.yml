@@ -42,7 +42,7 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
       DIALER: cf-worker
       TELNYX_API_KEY: ${TELNYX_API_KEY}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
       NODE_ENV: production
       PORT: 3000
     # No S3_ENDPOINT and no AWS keys: the SDK uses the EC2 instance role.
@@ -68,7 +68,7 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
       DIALER: cf-worker
       TELNYX_API_KEY: ${TELNYX_API_KEY}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
       NODE_ENV: production
     command: ["node", "api/dist/worker.js"]
 

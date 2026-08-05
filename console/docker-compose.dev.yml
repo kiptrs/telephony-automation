@@ -30,7 +30,7 @@ x-api-env: &api-env
   WORKER_TRIGGER_SECRET: ${WORKER_TRIGGER_SECRET:-dev-trigger-secret}
   WORKER_HMAC_SECRET: ${WORKER_HMAC_SECRET:-dev-hmac-secret-at-least-32-characters}
   TELNYX_API_KEY: ${TELNYX_API_KEY:-dev-telnyx-key}
-  OPENAI_API_KEY: ${OPENAI_API_KEY:-dev-openai-key}
+  ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-dev-elevenlabs-key}
 
 services:
   postgres:

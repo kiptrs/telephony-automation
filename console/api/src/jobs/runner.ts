@@ -2,10 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "../config.js";
 import type { Pool } from "../db/client.js";
 import { ingestRecording } from "../media/ingest.js";
-import {
-  OpenAiTranscriptionClient,
-  transcribeRecording,
-} from "../media/transcribe.js";
+import { ElevenLabsTranscriptionClient } from "../media/scribe.js";
+import { transcribeRecording } from "../media/transcribe.js";
 import type { S3Client } from "../s3.js";
 import type { JobKind, JobQueue } from "./queue.js";
 
@@ -56,7 +54,7 @@ export function buildHandlers(deps: {
   config: Config;
   s3: S3Client;
 }): JobHandlers {
-  const client = new OpenAiTranscriptionClient(deps.config);
+  const client = new ElevenLabsTranscriptionClient(deps.config);
 
   return {
     ingest_recording: (payload) =>

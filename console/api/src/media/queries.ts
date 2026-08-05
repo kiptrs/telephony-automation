@@ -88,6 +88,17 @@ export async function markIngested(
   );
 }
 
+/** Written from the transcription engine's reported duration, not at ingest. */
+export async function setRecordingDuration(
+  pool: Pool,
+  args: { id: string; durationMs: number },
+): Promise<void> {
+  await pool.query(`UPDATE recordings SET duration_ms = $2 WHERE id = $1`, [
+    args.id,
+    args.durationMs,
+  ]);
+}
+
 export async function markTelnyxDeleted(pool: Pool, id: string): Promise<void> {
   await pool.query(
     `UPDATE recordings SET telnyx_deleted_at = now() WHERE id = $1`,
@@ -114,13 +125,18 @@ export async function findRecordingForCall(
 }
 
 /**
- * Recordings in this campaign that are in S3 and have no finished transcript.
- * This is what the "Transcribe" button enqueues.
+ * Recordings in this campaign that are in S3 and have no usable transcript from
+ * `engine`. This is what the "Transcribe" button enqueues.
+ *
+ * A transcript from a different engine counts as missing, so changing the
+ * engine makes the button re-do the back catalogue exactly once and then go
+ * idle again. That is the whole migration path off a previous engine.
  */
 export async function recordingsAwaitingTranscript(
   pool: Pool,
   tenantId: string,
   campaignId: string,
+  engine: string,
 ): Promise<string[]> {
   const result = await pool.query(
     `SELECT r.id
@@ -130,8 +146,8 @@ export async function recordingsAwaitingTranscript(
        LEFT JOIN transcripts t ON t.recording_id = r.id
       WHERE c.tenant_id = $1 AND ca.campaign_id = $2
         AND r.ingested_at IS NOT NULL
-        AND (t.id IS NULL OR t.status = 'failed')`,
-    [tenantId, campaignId],
+        AND (t.id IS NULL OR t.status = 'failed' OR t.engine <> $3)`,
+    [tenantId, campaignId, engine],
   );
   return parseRows(z.object({ id: z.string().uuid() }), result).map(
     (row) => row.id,

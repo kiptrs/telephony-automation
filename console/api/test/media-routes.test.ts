@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../src/app.js";
 import { createPool, type Pool } from "../src/db/client.js";
+import { TRANSCRIPTION_MODEL } from "../src/media/scribe.js";
 import { createS3, putObject } from "../src/s3.js";
 import { loginAs, resetDatabase, seedTenant, testConfig } from "./helpers.js";
 
@@ -90,8 +91,8 @@ describe("POST /api/campaigns/:id/transcribe", () => {
   it("skips a recording that already has a finished transcript", async () => {
     await pool.query(
       `INSERT INTO transcripts (recording_id, engine, status, text)
-            VALUES ($1, 'whisper-1', 'done', 'hello')`,
-      [recordingId],
+            VALUES ($1, $2, 'done', 'hello')`,
+      [recordingId, TRANSCRIPTION_MODEL],
     );
     const response = await app.inject({
       method: "POST",
@@ -101,11 +102,31 @@ describe("POST /api/campaigns/:id/transcribe", () => {
     expect(response.json().enqueued).toBe(0);
   });
 
+  it("re-enqueues a recording transcribed by a superseded engine", async () => {
+    await pool.query(
+      `INSERT INTO transcripts (recording_id, engine, status, text)
+            VALUES ($1, 'whisper-1', 'done', 'hello')`,
+      [recordingId],
+    );
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/campaigns/${campaignId}/transcribe`,
+      headers: { cookie },
+    });
+    expect(response.json().enqueued).toBe(1);
+
+    const row = await pool.query("SELECT engine, status FROM transcripts");
+    expect(row.rows[0].engine).toBe(TRANSCRIPTION_MODEL);
+    expect(row.rows[0].status).toBe("pending");
+  });
+
   it("re-enqueues a recording whose transcript failed", async () => {
+    // Current engine on purpose, so this tests the failed status and not the
+    // superseded-engine rule that the case below covers.
     await pool.query(
       `INSERT INTO transcripts (recording_id, engine, status, error)
-            VALUES ($1, 'whisper-1', 'failed', 'rate limited')`,
-      [recordingId],
+            VALUES ($1, $2, 'failed', 'rate limited')`,
+      [recordingId, TRANSCRIPTION_MODEL],
     );
     const response = await app.inject({
       method: "POST",

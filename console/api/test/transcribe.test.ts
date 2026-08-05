@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createPool, type Pool } from "../src/db/client.js";
-import { transcribeRecording, type TranscriptionClient } from "../src/media/transcribe.js";
+import {
+  transcribeRecording,
+  type TranscriptionClient,
+  type TranscriptionResult,
+} from "../src/media/transcribe.js";
 import { createS3, putObject } from "../src/s3.js";
 import { resetDatabase, seedTenant, testConfig } from "./helpers.js";
 
@@ -12,13 +16,19 @@ let s3Key: string;
 class FakeClient implements TranscriptionClient {
   readonly seen: { filename: string; language: string | null; bytes: number }[] = [];
 
-  constructor(private readonly behaviour: { text?: string; throws?: Error } = {}) {}
+  constructor(
+    private readonly behaviour: {
+      text?: string;
+      throws?: Error;
+      durationSecs?: number;
+    } = {},
+  ) {}
 
   async transcribe(args: {
     audio: Buffer;
     filename: string;
     language: string | null;
-  }): Promise<{ text: string; raw: unknown }> {
+  }): Promise<TranscriptionResult> {
     this.seen.push({
       filename: args.filename,
       language: args.language,
@@ -28,6 +38,7 @@ class FakeClient implements TranscriptionClient {
     return {
       text: this.behaviour.text ?? "labas rytas",
       raw: { segments: [] },
+      durationSecs: this.behaviour.durationSecs ?? null,
     };
   }
 }
@@ -172,6 +183,26 @@ describe("transcribeRecording", () => {
     );
     expect(rows.rows[0].n).toBe(1);
     expect((await transcriptRow()).text).toBe("second");
+  });
+
+  it("fills in the recording duration the engine reported", async () => {
+    await transcribeRecording(deps(new FakeClient({ durationSecs: 42.4 })), {
+      recordingId,
+    });
+    const row = await pool.query(
+      "SELECT duration_ms FROM recordings WHERE id = $1",
+      [recordingId],
+    );
+    expect(row.rows[0].duration_ms).toBe(42400);
+  });
+
+  it("leaves the duration null when the engine does not report one", async () => {
+    await transcribeRecording(deps(new FakeClient()), { recordingId });
+    const row = await pool.query(
+      "SELECT duration_ms FROM recordings WHERE id = $1",
+      [recordingId],
+    );
+    expect(row.rows[0].duration_ms).toBeNull();
   });
 
   it("marks the transcript running while the engine works", async () => {

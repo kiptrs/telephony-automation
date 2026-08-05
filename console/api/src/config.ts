@@ -14,7 +14,7 @@ const envSchema = z.object({
   PUBLIC_BASE_URL: z.string().url(),
   DIALER: z.enum(["cf-worker", "fake"]).default("cf-worker"),
   TELNYX_API_KEY: z.string().min(1),
-  OPENAI_API_KEY: z.string().min(1),
+  ELEVENLABS_API_KEY: z.string().min(1),
 });
 
 export interface Config {
@@ -39,7 +39,8 @@ export interface Config {
   dialer: "cf-worker" | "fake";
   /** The same key the Worker holds; the console needs it only to delete recordings. */
   telnyxApiKey: string;
-  openaiApiKey: string;
+  /** Speech to text. Only the worker process uses it. */
+  elevenLabsApiKey: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
@@ -84,6 +85,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     publicBaseUrl: value.PUBLIC_BASE_URL,
     dialer: value.DIALER,
     telnyxApiKey: value.TELNYX_API_KEY,
-    openaiApiKey: value.OPENAI_API_KEY,
+    elevenLabsApiKey: value.ELEVENLABS_API_KEY,
   };
 }

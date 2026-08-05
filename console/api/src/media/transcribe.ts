@@ -1,4 +1,3 @@
-import OpenAI, { toFile } from "openai";
 import type { Config } from "../config.js";
 import type { Pool } from "../db/client.js";
 import { getObject, putObject, type S3Client } from "../s3.js";
@@ -8,44 +7,30 @@ import {
   markTranscriptDone,
   markTranscriptFailed,
   markTranscriptRunning,
+  setRecordingDuration,
 } from "./queries.js";
 
-export const WHISPER_MODEL = "whisper-1";
-
-/** The API's limit is 25 MB; stopping short of it keeps the error ours. */
+/**
+ * Not an engine limit - ElevenLabs accepts files up to 5 GB. A survey recording
+ * is around a megabyte, so a file this size means something upstream went
+ * wrong, and refusing it is cheaper than transcribing it.
+ */
 export const MAX_TRANSCRIBE_BYTES = 24 * 1024 * 1024;
+
+export interface TranscriptionResult {
+  text: string;
+  /** The whole engine response, kept intact for the later analysis agent. */
+  raw: unknown;
+  /** Absent when the engine does not report it. */
+  durationSecs?: number | null;
+}
 
 export interface TranscriptionClient {
   transcribe(args: {
     audio: Buffer;
     filename: string;
     language: string | null;
-  }): Promise<{ text: string; raw: unknown }>;
-}
-
-export class OpenAiTranscriptionClient implements TranscriptionClient {
-  private readonly client: OpenAI;
-
-  constructor(config: Config) {
-    this.client = new OpenAI({ apiKey: config.openaiApiKey });
-  }
-
-  async transcribe(args: {
-    audio: Buffer;
-    filename: string;
-    language: string | null;
-  }): Promise<{ text: string; raw: unknown }> {
-    const response = await this.client.audio.transcriptions.create({
-      file: await toFile(args.audio, args.filename, { type: "audio/mpeg" }),
-      model: WHISPER_MODEL,
-      // Whisper auto-detects without this, but the campaign already knows, and
-      // a hint measurably improves accuracy on short utterances.
-      ...(args.language ? { language: args.language } : {}),
-      response_format: "verbose_json",
-    });
-
-    return { text: response.text, raw: response };
-  }
+  }): Promise<TranscriptionResult>;
 }
 
 export interface TranscribeDeps {
@@ -56,8 +41,8 @@ export interface TranscribeDeps {
 }
 
 /**
- * Only ever runs because an operator asked. Whisper is billed per minute, so
- * nothing here is triggered by a call finishing.
+ * Only ever runs because an operator asked. Transcription is billed per minute,
+ * so nothing here is triggered by a call finishing.
  */
 export async function transcribeRecording(
   deps: TranscribeDeps,
@@ -97,6 +82,16 @@ export async function transcribeRecording(
       body: Buffer.from(JSON.stringify(result.raw, null, 2)),
       contentType: "application/json",
     });
+
+    // recordings.duration_ms has no other writer. Filling it here leaves it
+    // null for anything never transcribed, which is a meaning rather than a
+    // gap, and per-minute is how both call and transcription cost are billed.
+    if (typeof result.durationSecs === "number") {
+      await setRecordingDuration(pool, {
+        id: recording.id,
+        durationMs: Math.round(result.durationSecs * 1000),
+      });
+    }
 
     await markTranscriptDone(pool, {
       recordingId: recording.id,

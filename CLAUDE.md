@@ -193,8 +193,9 @@ Things that are easy to get wrong here:
   upload to S3, and only then delete it at Telnyx. A job that dies between the
   last two steps finishes correctly on retry because each stage is skipped if
   already done. A failed ingest must never destroy the only copy of a call.
-- **Nothing transcribes automatically** — Whisper is billed per minute. A button
-  enqueues one job per ingested recording with no finished transcript.
+- **Nothing transcribes automatically** — transcription is billed per minute. A
+  button enqueues one job per ingested recording with no transcript from the
+  current engine, so changing that constant re-does the back catalogue once.
 - **`DIALER=fake`** substitutes a dialer that synthesises the whole callback
   sequence. It is the default in `docker-compose.dev.yml`, because Telnyx cannot
   fetch audio from a local MinIO and a Worker cannot POST a callback to a
@@ -261,7 +262,7 @@ manifest read-back, the 502-on-seed-failure path, and `/end` on hangup. What is
 not covered is the storage round-trip and the `blockConcurrencyWhile` reload.
 If you change `session.ts`, verification means a real call.
 
-`console/`: 27 API suites and 4 web suites. The API ones talk to a real Postgres
+`console/`: 28 API suites and 4 web suites. The API ones talk to a real Postgres
 and a real MinIO rather than mocking them, because the number of things worth
 testing there that touch neither is small — so they need `npm run dev` (or at
 least its `postgres`, `minio`, `minio-init` and `dbmate` services) running

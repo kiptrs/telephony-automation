@@ -74,8 +74,9 @@ the console, and recordings and transcripts pulled out of Telnyx.
    to the console's `/callbacks/worker`, signed with `CONSOLE_HMAC_SECRET`.
 8. The console enqueues an ingest job: download the mp3 from Telnyx, upload to
    S3, and only then delete it at Telnyx. That order is deliberate and tested.
-9. Transcription never runs on its own - Whisper is billed per minute. A button
-   on the campaign enqueues one job per recording.
+9. Transcription never runs on its own - it is billed per minute. A button on
+   the campaign enqueues one job per recording, transcribed and diarized by
+   ElevenLabs Scribe.
 
 Throughput is bounded by the number pool, not by the loop. One number at
 `max_concurrent: 1` means one call at a time, whatever the campaign size.
@@ -395,7 +396,7 @@ Either use `t3.medium`, or add swap on a `t3.small`:
     echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
 Outbound internet access is required at runtime, not just at build time: the API
-reaches Telnyx, OpenAI, and the Cloudflare Worker. A private subnet needs a NAT
+reaches Telnyx, ElevenLabs, and the Cloudflare Worker. A private subnet needs a NAT
 gateway.
 
 `arm64` (`t4g.*`) works too - `argon2` and `esbuild` both build natively - but
@@ -408,7 +409,7 @@ use the `aarch64`/`arm64` plugin binaries in 4.5.
 | Inbound | 80 | `0.0.0.0/0` | ACME HTTP-01 challenge, and the redirect to 443 |
 | Inbound | 443 | `0.0.0.0/0` | The console itself, and the Worker's callbacks |
 | Inbound | 22 | your IP only | Omit entirely if using Session Manager |
-| Outbound | all | `0.0.0.0/0` | Telnyx, OpenAI, S3, Let's Encrypt |
+| Outbound | all | `0.0.0.0/0` | Telnyx, ElevenLabs, S3, Let's Encrypt |
 
 Port 80 must stay open permanently, not just during setup - Caddy renews
 certificates on the same challenge every 60 days.
@@ -530,7 +531,7 @@ Edit `.env.prod`:
     DIALER=cf-worker
 
     TELNYX_API_KEY=<the same key the Worker holds>
-    OPENAI_API_KEY=sk-...
+    ELEVENLABS_API_KEY=sk_...
 
 Points where this goes wrong:
 

@@ -15,7 +15,7 @@ export const MAX_QUESTIONS = 10;
 
 export const createCampaignSchema = z.object({
   name: z.string().trim().min(1).max(200),
-  // Whisper's hint, ISO-639-1.
+  // The transcription language hint, ISO-639-1.
   language: z.string().trim().length(2).toLowerCase(),
   // E.164 parsing region, ISO-3166-1 alpha-2.
   defaultCountry: z.string().trim().length(2).toUpperCase(),

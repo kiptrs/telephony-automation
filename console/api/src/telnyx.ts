@@ -17,8 +17,8 @@ function stringAt(source: unknown, key: string): string | null {
 }
 
 /**
- * mp3 first: it is what record_start asks for and it is a quarter the size of
- * the wav, which matters against Whisper's 25 MB limit.
+ * mp3 first: it is what record_start asks for, and at a quarter the size of the
+ * wav it is cheaper to store and to move.
  */
 export function pickRecordingUrl(payload: unknown): string | null {
   if (typeof payload !== "object" || payload === null) return null;

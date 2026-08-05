@@ -40,7 +40,7 @@ up a save. Editing `packages/shared` needs a restart of the affected service -
 it is compiled into the image, not watched.
 
 Overrides go in `console/.env`, which compose reads for substitution:
-`OPENAI_API_KEY` for real transcription, or `DIALER=cf-worker` plus the
+`ELEVENLABS_API_KEY` for real transcription, or `DIALER=cf-worker` plus the
 `WORKER_*` values to dial through the real Cloudflare Worker.
 
 ## Scripts
@@ -202,17 +202,25 @@ retry, because each stage is skipped if already done.
 
 ### Transcription
 
-Nothing transcribes automatically - Whisper is billed per minute. The
+Nothing transcribes automatically - transcription is billed per minute. The
 "Transcribe" button on a campaign enqueues one job per ingested recording that
-has no finished transcript, using the campaign's `language` as the hint. Failed
-transcripts are re-enqueued by pressing the button again.
+has no transcript from the current engine, using the campaign's `language` as
+the hint. Failed transcripts are re-enqueued by pressing the button again.
 
-Transcripts are one blob per call. Per-question segmentation is deliberately out
-of scope; the verbose Whisper response is kept at
-`tenants/{tenant}/calls/{call}/transcript.json` for whatever reads it next.
+The engine is ElevenLabs Scribe v2, with diarization on. `transcripts.text`
+holds one line per speaker turn, labelled `Speaker 1` and `Speaker 2` in order
+of first appearance and nothing more - see `api/src/media/scribe.ts` for why
+that cannot safely be resolved into agent and respondent. The whole engine
+response, including the real speaker ids, per-word timings and confidences, is
+kept at `tenants/{tenant}/calls/{call}/transcript.json` for whatever reads it
+next. Per-question segmentation is deliberately out of scope.
 
-Files above 24 MB fail with an explicit message rather than being truncated. A
-call long enough to hit that is itself a signal something went wrong.
+Changing the engine constant makes the button re-do the back catalogue once:
+a transcript from any other engine counts as missing.
+
+Files above 24 MB fail with an explicit message rather than being truncated.
+That is a sanity guard, not an engine limit - a call long enough to hit it is
+itself a signal something went wrong.
 
 ### Jobs
 

@@ -6,7 +6,7 @@ import type { Config } from "../config.js";
 import type { Pool } from "../db/client.js";
 import type { JobQueue } from "../jobs/queue.js";
 import { presignGet, type S3Client } from "../s3.js";
-import { WHISPER_MODEL } from "./transcribe.js";
+import { TRANSCRIPTION_MODEL } from "./scribe.js";
 import {
   findRecordingForCall,
   findTranscriptForCall,
@@ -30,8 +30,8 @@ export function registerMediaRoutes(
   }
 
   /**
-   * On demand only. Whisper is billed per minute, so nothing here runs because
-   * a call finished - an operator has to ask.
+   * On demand only. Transcription is billed per minute, so nothing here runs
+   * because a call finished - an operator has to ask.
    */
   app.post("/api/campaigns/:id/transcribe", async (request, reply) => {
     const { tenantId } = requireTenant(request);
@@ -44,6 +44,7 @@ export function registerMediaRoutes(
       pool,
       tenantId,
       campaignId,
+      TRANSCRIPTION_MODEL,
     );
 
     for (const recordingId of recordingIds) {
@@ -51,7 +52,7 @@ export function registerMediaRoutes(
       // immediately rather than after the first poll that catches it running.
       await upsertTranscript(pool, {
         recordingId,
-        engine: WHISPER_MODEL,
+        engine: TRANSCRIPTION_MODEL,
         language: campaign.language,
       });
       await queue.enqueue("transcribe", { recordingId });

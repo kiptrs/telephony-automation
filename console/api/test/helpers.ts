@@ -21,7 +21,7 @@ export function testConfig(): Config {
     PUBLIC_BASE_URL: "https://console.example",
     DIALER: "fake",
     TELNYX_API_KEY: "telnyx-key",
-    OPENAI_API_KEY: "openai-key",
+    ELEVENLABS_API_KEY: "elevenlabs-key",
   });
 }
 
