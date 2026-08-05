@@ -1,5 +1,6 @@
 import {
   insertQueuedCall,
+  markContactDone,
   markDialing,
   markEnded,
   markFailed,
@@ -32,6 +33,14 @@ export const PRESIGN_TTL_SECONDS = 3600;
 
 export const TICK_MS = 2000;
 
+/**
+ * Automatic redials per contact. Failure here is a dial that never reached
+ * Telnyx - a Worker outage or a secret mismatch - so a couple of retries
+ * absorb a blip, and the cap stops a misconfiguration from looping forever.
+ * After the cap the contact is done and the call's Retry button is the path.
+ */
+export const MAX_DIAL_ATTEMPTS = 3;
+
 export interface DispatchDeps {
   pool: Pool;
   config: Config;
@@ -57,6 +66,10 @@ export async function dispatchOnce(
       lastStep: null,
       hangupCause: null,
     });
+    // The hangup callback that normally does this never arrived. Done, not
+    // pending: an unknown outcome must not auto-redial someone who may have
+    // just finished the survey. The call is ended, so Retry stays available.
+    await markContactDone(pool, callId);
   }
 
   let dialled = 0;
@@ -71,13 +84,13 @@ export async function dispatchOnce(
         const contact = await claimNextContact(client, campaign.id);
         if (!contact) return null;
 
-        const callId = await insertQueuedCall(client, {
+        const queued = await insertQueuedCall(client, {
           campaignId: campaign.id,
           contactId: contact.contactId,
           phoneNumberId: lease.phoneNumberId,
         });
-        await attachLeaseToCall(client, lease.leaseId, callId);
-        return { ...contact, callId };
+        await attachLeaseToCall(client, lease.leaseId, queued.id);
+        return { ...contact, callId: queued.id, attempt: queued.attempt };
       });
 
       if (!claimed) {
@@ -114,7 +127,13 @@ export async function dispatchOnce(
         // row stays as history so the operator can see why it failed.
         await markFailed(pool, claimed.callId);
         await releaseLease(pool, lease.leaseId);
-        await releaseContact(pool, claimed.contactId);
+        if (claimed.attempt >= MAX_DIAL_ATTEMPTS) {
+          // Terminal for this contact: done + a failed call keeps the manual
+          // Retry button as the only way it dials again.
+          await markContactDone(pool, claimed.callId);
+        } else {
+          await releaseContact(pool, claimed.contactId);
+        }
         console.error(
           JSON.stringify({
             msg: "dial_failed",

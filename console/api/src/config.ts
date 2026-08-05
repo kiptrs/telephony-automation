@@ -52,6 +52,17 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   }
 
   const value = parsed.data;
+
+  if (
+    value.DIALER === "cf-worker" &&
+    !value.PUBLIC_BASE_URL.startsWith("https://")
+  ) {
+    throw new Error(
+      "invalid environment: PUBLIC_BASE_URL must be https when DIALER=cf-worker" +
+        " - the Worker rejects http callback URLs",
+    );
+  }
+
   const endpoint = value.S3_ENDPOINT ?? null;
 
   return {

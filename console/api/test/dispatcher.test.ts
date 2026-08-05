@@ -218,6 +218,60 @@ describe("dispatchOnce", () => {
     expect((await dispatchOnce(deps(new RecordingDialer()))).dialled).toBe(0);
   });
 
+  it("stops redialling a contact after three failed dial attempts", async () => {
+    await addContacts(1);
+    await addNumbers(1);
+    const failing = new RecordingDialer(new DialError(401, "bad secret"));
+
+    for (let tick = 0; tick < 5; tick++) {
+      await dispatchOnce(deps(failing));
+    }
+
+    // Three dials, then the contact is done and ticks 4 and 5 dial nothing.
+    expect(dialled).toHaveLength(3);
+
+    const contact = await pool.query("SELECT status FROM contacts");
+    expect(contact.rows[0].status).toBe("done");
+
+    const calls = await pool.query(
+      "SELECT attempt, status FROM calls ORDER BY attempt",
+    );
+    expect(calls.rows.map((row) => row.attempt)).toEqual([1, 2, 3]);
+    expect(calls.rows.every((row) => row.status === "failed")).toBe(true);
+  });
+
+  it("still returns the contact to pending on an early failure, so a blip retries", async () => {
+    await addContacts(1);
+    await addNumbers(1);
+
+    await dispatchOnce(deps(new RecordingDialer(new DialError(500, "down"))));
+
+    const contact = await pool.query("SELECT status FROM contacts");
+    expect(contact.rows[0].status).toBe("pending");
+  });
+
+  it("marks the contact done when its lease expires, so the campaign can finish", async () => {
+    await addContacts(1);
+    await addNumbers(1);
+    await dispatchOnce(deps(new RecordingDialer()));
+
+    // The hangup callback never arrives; the lease times out instead.
+    await pool.query(
+      "UPDATE number_leases SET expires_at = now() - interval '1 minute'",
+    );
+    await dispatchOnce(deps(new RecordingDialer()));
+
+    const contact = await pool.query("SELECT status FROM contacts");
+    expect(contact.rows[0].status).toBe("done");
+
+    const call = await pool.query("SELECT status, outcome FROM calls");
+    expect(call.rows[0].status).toBe("ended");
+    expect(call.rows[0].outcome).toBe("unknown");
+
+    const campaign = await pool.query("SELECT status FROM campaigns");
+    expect(campaign.rows[0].status).toBe("completed");
+  });
+
   it("does not lend a number dedicated to another tenant", async () => {
     const other = await seedTenant(pool, "globex");
     await addContacts(1);

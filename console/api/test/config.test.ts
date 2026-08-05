@@ -46,4 +46,23 @@ describe("loadConfig", () => {
       /SESSION_SECRET/,
     );
   });
+
+  it("refuses an http PUBLIC_BASE_URL with the real dialer, which the Worker would 400", () => {
+    expect(() =>
+      loadConfig({
+        ...valid,
+        DIALER: "cf-worker",
+        PUBLIC_BASE_URL: "http://console.example.com",
+      }),
+    ).toThrow(/PUBLIC_BASE_URL/);
+  });
+
+  it("accepts an http PUBLIC_BASE_URL with the fake dialer, which dev compose relies on", () => {
+    const config = loadConfig({
+      ...valid,
+      DIALER: "fake",
+      PUBLIC_BASE_URL: "http://api:3000",
+    });
+    expect(config.publicBaseUrl).toBe("http://api:3000");
+  });
 });

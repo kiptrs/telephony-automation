@@ -5,6 +5,7 @@ import {
   insertUser,
   updatePasswordHash,
 } from "../auth/queries.js";
+import { deleteSessionsForUser } from "../auth/sessions.js";
 import type { Pool } from "../db/client.js";
 import { insertNumber, type PhoneNumber } from "../numbers/queries.js";
 import {
@@ -65,6 +66,9 @@ export async function resetPasswordCommand(
   pool: Pool,
   args: { email: string },
 ): Promise<{ email: string; password: string }> {
+  const user = await findUserByEmail(pool, args.email);
+  if (!user) throw new Error(`no user with email ${args.email}`);
+
   const password = generatePassword();
   const updated = await updatePasswordHash(
     pool,
@@ -72,6 +76,10 @@ export async function resetPasswordCommand(
     await hashPassword(password),
   );
   if (!updated) throw new Error(`no user with email ${args.email}`);
+
+  // The whole reason sessions live in Postgres: a reset revokes immediately.
+  await deleteSessionsForUser(pool, user.id);
+
   return { email: args.email, password };
 }
 

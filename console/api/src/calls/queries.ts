@@ -106,15 +106,18 @@ export async function campaignProgress(
 export async function insertQueuedCall(
   client: PoolClient,
   args: { campaignId: string; contactId: string; phoneNumberId: string },
-): Promise<string> {
+): Promise<{ id: string; attempt: number }> {
   const result = await client.query(
     `INSERT INTO calls (campaign_id, contact_id, phone_number_id, attempt)
      SELECT $1, $2, $3,
             COALESCE((SELECT max(attempt) FROM calls WHERE contact_id = $2), 0) + 1
-       RETURNING id`,
+       RETURNING id, attempt`,
     [args.campaignId, args.contactId, args.phoneNumberId],
   );
-  return parseExactlyOne(z.object({ id: z.string().uuid() }), result).id;
+  return parseExactlyOne(
+    z.object({ id: z.string().uuid(), attempt: z.number().int() }),
+    result,
+  );
 }
 
 export async function markDialing(

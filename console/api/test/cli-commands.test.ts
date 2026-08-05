@@ -7,6 +7,7 @@ import {
 } from "../src/cli/commands.js";
 import { verifyPassword } from "../src/auth/passwords.js";
 import { findUserByEmail } from "../src/auth/queries.js";
+import { createSession, findUserBySession } from "../src/auth/sessions.js";
 import { createPool, type Pool } from "../src/db/client.js";
 import { testConfig } from "./helpers.js";
 
@@ -127,5 +128,20 @@ describe("resetPasswordCommand", () => {
     await expect(
       resetPasswordCommand(pool, { email: "nobody@acme.com" }),
     ).rejects.toThrow(/no user with email/);
+  });
+
+  it("revokes every live session, so a stolen cookie dies with the old password", async () => {
+    await createTenantCommand(pool, { name: "Acme", slug: "acme" });
+    await createUserCommand(pool, {
+      email: "a@acme.com",
+      tenantSlug: "acme",
+      platformAdmin: false,
+    });
+    const user = await findUserByEmail(pool, "a@acme.com");
+    const session = await createSession(pool, user!.id);
+
+    await resetPasswordCommand(pool, { email: "a@acme.com" });
+
+    expect(await findUserBySession(pool, session.id)).toBeNull();
   });
 });

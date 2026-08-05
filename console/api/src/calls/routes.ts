@@ -59,6 +59,16 @@ export function registerCallRoutes(
       call.contact_id,
     ]);
 
+    // Completion is automatic and usually precedes the operator seeing the
+    // outcomes at all. A retry is new work, so it reopens the campaign;
+    // paused stays paused because pause is an explicit operator choice.
+    await pool.query(
+      `UPDATE campaigns SET status = 'running'
+        WHERE status = 'completed'
+          AND id = (SELECT campaign_id FROM calls WHERE id = $1)`,
+      [call.id],
+    );
+
     return { ok: true };
   });
 }
