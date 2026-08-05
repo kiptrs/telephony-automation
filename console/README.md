@@ -133,6 +133,11 @@ built frontend into a volume, and Caddy terminating TLS.
     # edit .env.prod, then
     npm run prod
 
+The instance needs both Docker CLI plugins, not just Compose: Compose delegates
+image builds to Buildx and refuses to build without `docker-buildx` 0.17.0 or
+newer. Amazon Linux 2023 ships neither plugin with the `docker` package. The
+root `README.md` section 4.5 installs both.
+
 `.env.prod`, not `.env`: compose reads `.env` for both compose files, so
 production values in it would silently reconfigure `npm run dev` - starting
 with `DIALER=cf-worker`, which dials real phones.

@@ -399,7 +399,7 @@ reaches Telnyx, OpenAI, and the Cloudflare Worker. A private subnet needs a NAT
 gateway.
 
 `arm64` (`t4g.*`) works too - `argon2` and `esbuild` both build natively - but
-use the `aarch64` Compose binary in 4.5.
+use the `aarch64`/`arm64` plugin binaries in 4.5.
 
 ### 4.2 Security group
 
@@ -450,10 +450,10 @@ Both should succeed. Note that `aws s3 ls s3://$BUCKET` will *not* - that needs
 sign of a broken role. The probe object cannot be deleted by this role either;
 remove it with your own credentials afterwards.
 
-### 4.5 Docker and the Compose plugin
+### 4.5 Docker, Compose, and Buildx
 
-Amazon Linux 2023 ships Docker in its repositories but not the Compose plugin,
-which has to be installed by hand:
+Amazon Linux 2023 ships Docker in its repositories but neither CLI plugin. Both
+have to be installed by hand:
 
     sudo dnf update -y
     sudo dnf install -y docker git
@@ -463,15 +463,36 @@ which has to be installed by hand:
 Log out and back in for the group change to apply, then:
 
     sudo mkdir -p /usr/local/lib/docker/cli-plugins
+
     sudo curl -SL \
       https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
       -o /usr/local/lib/docker/cli-plugins/docker-compose
     sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
+    BUILDX=v0.30.1
+    sudo curl -SL \
+      "https://github.com/docker/buildx/releases/download/$BUILDX/buildx-$BUILDX.linux-amd64" \
+      -o /usr/local/lib/docker/cli-plugins/docker-buildx
+    sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+
     docker compose version
+    docker buildx version
     docker run --rm hello-world
 
-On `arm64`, substitute `docker-compose-linux-aarch64`.
+**Buildx is not optional, and 0.17.0 is the floor.** Current Compose delegates
+every image build to it, so on a box with no `docker-buildx` plugin - or an older
+one - the `up -d --build` in 5.2 stops immediately with `compose build requires
+buildx 0.17.0 or later` and nothing starts. It is easy to miss when installing
+only the Compose plugin, because `docker compose version` then reports a perfectly
+healthy Compose and only builds fail.
+
+Unlike Compose, Buildx publishes no `latest/download` alias - its release assets
+carry the version in the filename - so the version above is pinned. Take the
+current one from https://github.com/docker/buildx/releases; anything from 0.17.0
+up satisfies Compose.
+
+On `arm64`, substitute `docker-compose-linux-aarch64` and
+`buildx-$BUILDX.linux-arm64`.
 
 Node is not needed on the instance. Everything compiles inside the images. The
 `npm run prod*` scripts in `console/package.json` are conveniences for a machine
@@ -672,6 +693,7 @@ Adding `-v` destroys `pgdata` and every account with it.
 | Audio upload succeeds, playback 403s | `S3_REGION` does not match the bucket's region, or the presigned URL expired |
 | Recordings never appear in S3 | Ingest jobs are failing; check `last_error` in `jobs` |
 | Build is OOM-killed | The instance is too small. See 4.1 |
+| `compose build requires buildx 0.17.0 or later` | The `docker-buildx` CLI plugin is missing or too old on the instance. Installing the Compose plugin alone is not enough. See 4.5 |
 
 One subtlety worth knowing before it bites: presigned URLs are signed with the
 instance role's temporary credentials, so a URL cannot outlive the credentials
